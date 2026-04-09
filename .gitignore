@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+dist/
+*.tsbuildinfo
+data/
+media/
+videos/
+frontend_static/
+.env
+.codex-logs/
+.claude/
