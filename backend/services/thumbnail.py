@@ -169,11 +169,14 @@ def generate_contact_sheet(
     rows: int = 4,
     tile_width: int = 480,
 ) -> Path:
-    """Generate a single image with a grid of frames (16 frames at 4x4 default).
+    """Generate a grid of frames (16 frames at 4x4 default) via multi-seek.
 
-    Decode is offloaded to NVDEC when CUDA hwaccel is available — this is the
-    big win for contact sheets, because the ``select`` filter forces ffmpeg
-    to walk the *entire* video to count frames. CPU fallback is automatic.
+    Uses one ffmpeg invocation with N fast-seek inputs (``-ss T -i video`` per
+    tile) and a filter_complex that scales + tiles them. Each ``-ss`` before
+    ``-i`` jumps to the nearest keyframe, so total decode is ~N × few frames
+    instead of the entire video — orders of magnitude faster than the previous
+    ``select`` filter on long files. NVDEC is still used when available, with
+    CPU fallback for WMV/VC-1 on cards that don't support them.
     """
     settings = get_settings()
     target = settings.media_dir / "contact_sheets" / f"{video_id}.jpg"
@@ -186,25 +189,39 @@ def generate_contact_sheet(
         duration = 1.0
 
     n = cols * rows
-    # Pick every Nth frame so we end up with ~n frames spread across the file.
-    # Assumes ~25fps as a rough constant; exact accuracy isn't critical for a thumbnail grid.
-    every_nth = max(1, int(duration * 25 / n))
-    vf = f"select='not(mod(n\\,{every_nth}))',scale={tile_width}:-2,tile={cols}x{rows}"
+    # Spread timestamps across the video, skipping the very start (intros) and
+    # tail (credits / freeze frames) so the grid looks like actual content.
+    start = duration * 0.05
+    end = max(start + 0.1, duration * 0.95)
+    step = (end - start) / (n - 1) if n > 1 else 0.0
+    timestamps = [start + i * step for i in range(n)]
 
     def build(hw_args: list[str]) -> list[str]:
-        return [
+        cmd: list[str] = [
             settings.ffmpeg_binary,
             "-hide_banner",
             "-loglevel", "error",
-            *hw_args,
-            "-i", str(video_path),
-            "-vf", vf,
+        ]
+        for ts in timestamps:
+            cmd.extend([*hw_args, "-ss", f"{ts:.3f}", "-i", str(video_path)])
+        # Scale each input to identical dims (required by tile), then stack.
+        scale_chains = ";".join(
+            f"[{i}:v]scale={tile_width}:-2:force_original_aspect_ratio=decrease,"
+            f"pad={tile_width}:ih:-1:-1:color=black,setsar=1[v{i}]"
+            for i in range(n)
+        )
+        concat_inputs = "".join(f"[v{i}]" for i in range(n))
+        filter_complex = (
+            f"{scale_chains};{concat_inputs}concat=n={n}:v=1:a=0[cat];[cat]tile={cols}x{rows}"
+        )
+        cmd.extend([
+            "-filter_complex", filter_complex,
             "-frames:v", "1",
-            "-vsync", "vfr",
             "-q:v", "3",
             "-y",
             str(target),
-        ]
+        ])
+        return cmd
 
     completed = _run_ffmpeg_with_hw_fallback(build, label=f"contact_sheet {video_id}")
     if completed.returncode != 0 or not target.exists():

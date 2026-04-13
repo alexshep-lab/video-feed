@@ -45,8 +45,13 @@ REMUXABLE_VIDEO_CODECS: set[str] = {"h264", "avc1"}
 
 # Quality target for the converted MP4. Slightly worse than the compressor
 # because the goal is playability, not size reduction.
+#
+# Preset is "fast" (NVENC p3) rather than "medium" (p4). This is a batch
+# import path — the user is converting hundreds of files to glance-review
+# them. Throughput beats archival quality here; the compressor still uses
+# the slower preset when the user chooses to recompress for storage.
 CRF = 23
-PRESET = "medium"
+PRESET = "fast"
 AUDIO_BITRATE = "160k"
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
