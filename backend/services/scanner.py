@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..models import LibraryFolder, Tag, Video
 from .converter import enqueue_convert, needs_conversion, start_convert_worker
-from .metadata import extract_video_metadata, is_supported_video_file
+from .metadata import SUPPORTED_EXTENSIONS, extract_video_metadata
 from .thumbnail import generate_thumbnail
 
 # Shared scan progress state (thread-safe reads)
@@ -95,16 +95,21 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
 
     library_dirs = [Path(f.path) for f in folders]
 
-    # Phase 1: Count total files for progress
+    # Phase 1: Count total files for progress.
+    # Filter by extension BEFORE is_file() — rglob("*") yields every directory
+    # and non-video file too (tens of thousands on a big library), and is_file()
+    # is a syscall per entry. Suffix check is a cheap string op, so we prune
+    # the obvious non-matches before touching the disk.
     total = 0
     all_files: list[tuple[Path, Path]] = []  # (file_path, library_dir)
     for library_dir in library_dirs:
         if not library_dir.exists() or not library_dir.is_dir():
             continue
-        for path in sorted(library_dir.rglob("*")):
-            if is_supported_video_file(path):
+        for path in library_dir.rglob("*"):
+            if path.suffix.lower() in SUPPORTED_EXTENSIONS and path.is_file():
                 all_files.append((path, library_dir))
                 total += 1
+    all_files.sort(key=lambda item: str(item[0]))
 
     _update_progress(total_files=total, phase="scanning")
     current_paths = {sanitize_text(str(path.resolve())) or "" for path, _ in all_files}

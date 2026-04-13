@@ -179,7 +179,11 @@ def get_pending_conversion_candidates(session: Session) -> list[Video]:
 
 
 def enqueue_all_pending_conversions(session: Session) -> int:
-    videos = get_pending_conversion_candidates(session)
+    # Process h264 sources first — they go through stream-copy remux (seconds per
+    # file) rather than full re-encode. Putting them ahead of WMV means the user
+    # sees most of their library become playable quickly, instead of waiting out
+    # a long queue of heavy WMV transcodes before the fast ones get a turn.
+    videos = list(session.scalars(_apply_sort(_base_pending_conversion_query(), "h264_first")).all())
     queued_ids = {item for item in list(_queue._queue) if item != "__STOP__"}  # type: ignore[attr-defined]
     if _current_video_id:
         queued_ids.add(_current_video_id)
