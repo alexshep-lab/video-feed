@@ -60,6 +60,9 @@ export default function WatchPage() {
     const confirmedParam = searchParams.get("confirmed");
     if (confirmedParam === "true") f.confirmed = true;
     else if (confirmedParam === "false") f.confirmed = false;
+    // Review mode implicitly skips already-confirmed videos: if the user confirmed
+    // them, there's nothing left to review. If confirmed=true is explicit, respect it.
+    else f.confirmed = false;
     if (searchParams.get("ready") === "true") f.ready = true;
     const q = searchParams.get("q"); if (q) f.q = q;
     const tag = searchParams.get("tag"); if (tag) f.tag = tag;
@@ -207,6 +210,11 @@ export default function WatchPage() {
       setPlayerError(message);
     };
     const tryAutoplay = () => {
+      // In review mode we intentionally skip autoplay: the browser holds an
+      // open file handle while streaming, which locks the source on Windows
+      // and breaks Recycle Bin / Hard Delete. Review is about deciding fast
+      // from the palette — the user can click Play manually if needed.
+      if (reviewMode) return;
       el.play().catch(() => null);
     };
 
@@ -301,8 +309,26 @@ export default function WatchPage() {
 
   async function handleHardDelete() {
     if (!videoId) return;
-    if (!confirm("Permanently delete file from disk?")) return;
-    await deleteVideo(videoId, true);
+    if (!confirm("Move file to Recycle Bin?")) return;
+    // Release the file handle first: the browser <video> holds an open HTTP
+    // Range connection which locks the source file on Windows, making
+    // move_to_recycle_bin fail with a sharing-violation 500.
+    const el = videoRef.current;
+    if (el) {
+      try { el.pause(); } catch {}
+      el.removeAttribute("src");
+      try { el.load(); } catch {}
+    }
+    if (hlsRef.current) {
+      try { hlsRef.current.destroy(); } catch {}
+      hlsRef.current = null;
+    }
+    // Small delay so the socket fully closes before the delete call.
+    await new Promise((r) => setTimeout(r, 150));
+    const res = await deleteVideo(videoId, false, true);
+    if (res.status === "deleted_soft_fallback") {
+      alert(`Файл остался на диске (залочен): ${res.move_error ?? "?"}\nСтрока скрыта в БД — можно удалить файл вручную.`);
+    }
     if (reviewMode) {
       await advanceToNext();
     } else {
@@ -336,9 +362,9 @@ export default function WatchPage() {
               key={`${video.id}-${playerMode}-${video.raw_stream_url}-${video.hls_stream_url ?? ""}`}
               ref={videoRef}
               controls
-              autoPlay
+              autoPlay={!reviewMode}
               playsInline
-              preload="metadata"
+              preload={reviewMode ? "none" : "metadata"}
               className="max-h-[75vh] w-full rounded-[1.5rem] bg-black"
             >
               {playerMode === "raw" && video.raw_stream_url ? (
@@ -445,7 +471,7 @@ export default function WatchPage() {
             </button>
           ) : null}
           <button onClick={handleTrash} className={dangerCls}>Trash</button>
-          <button onClick={handleHardDelete} className={dangerCls}>Hard Delete</button>
+          <button onClick={handleHardDelete} className={dangerCls}>Recycle Bin</button>
         </div>
 
         <div className="space-y-1">

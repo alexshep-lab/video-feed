@@ -19,10 +19,18 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+SORT_OPTIONS = {
+    "name": "alphabetical",
+    "size_desc": "largest first",
+    "size_asc": "smallest first",
+    "duration_desc": "longest first",
+    "duration_asc": "shortest first",
+}
+
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
-from .thumbnail import generate_contact_sheet
+from .thumbnail import generate_contact_sheet, kill_running_ffmpeg_procs
 
 logger = logging.getLogger("videofeed.palette")
 
@@ -105,6 +113,64 @@ def count_videos_without_palette(session: Session) -> int:
     return missing
 
 
+def _sort_videos_query(sort: str):
+    stmt = select(Video).where(Video.deleted_at.is_(None))
+    if sort == "size_asc":
+        return stmt.order_by(Video.file_size.asc())
+    if sort == "size_desc":
+        return stmt.order_by(Video.file_size.desc())
+    if sort == "duration_asc":
+        return stmt.order_by(Video.duration.asc())
+    if sort == "duration_desc":
+        return stmt.order_by(Video.duration.desc().nullslast())
+    return stmt.order_by(Video.original_filename.asc())
+
+
+def list_missing_palette_videos(
+    session: Session,
+    limit: int = 20,
+    offset: int = 0,
+    sort: str = "name",
+) -> tuple[int, list[Video]]:
+    """Walk non-deleted videos in sorted order, return (total_missing, page).
+
+    The palette-exists check is a filesystem stat per row, so we iterate in the
+    requested sort order and collect missing rows. For a library with N videos
+    and M missing, this is O(N) stats — already what ``count_videos_without_palette``
+    does. Page slicing happens after the filter so the page size is honored.
+    """
+    if sort not in SORT_OPTIONS:
+        sort = "name"
+    missing: list[Video] = []
+    for video in session.scalars(_sort_videos_query(sort)).all():
+        if not palette_exists(video.id):
+            missing.append(video)
+    total = len(missing)
+    page = missing[offset : offset + limit] if limit > 0 else missing[offset:]
+    return total, page
+
+
+def enqueue_batch(video_ids: list[str]) -> int:
+    """Enqueue an explicit list of video IDs — used for ‘process selected first’."""
+    global _stop_requested
+    _stop_requested = False
+    queued_ids: set[str] = set()
+    try:
+        queued_ids = {item for item in list(_queue._queue) if item != "__STOP__"}  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    if _current_video_id:
+        queued_ids.add(_current_video_id)
+    count = 0
+    for vid in video_ids:
+        if vid in queued_ids:
+            continue
+        _queue.put_nowait(vid)
+        count += 1
+    _begin_tracking(count)
+    return count
+
+
 def enqueue_missing_palettes(session: Session) -> int:
     """Queue every non-deleted video that doesn't already have a contact sheet."""
     global _stop_requested
@@ -148,14 +214,25 @@ def start_palette_worker() -> None:
 
 
 async def stop_palette_worker() -> None:
-    global _worker_task
+    global _worker_task, _stop_requested
+    _stop_requested = True
+    # Drain pending items so the worker exits its get() loop immediately once
+    # the current job finishes.
+    while True:
+        try:
+            _queue.get_nowait()
+            _queue.task_done()
+        except asyncio.QueueEmpty:
+            break
+    # Kill any ffmpeg running in a worker thread — otherwise the thread stays
+    # alive, Python won't exit, and the server hangs on shutdown.
+    kill_running_ffmpeg_procs()
     if _worker_task and not _worker_task.done():
         _queue.put_nowait("__STOP__")
-        _worker_task.cancel()
         try:
-            await asyncio.wait_for(_worker_task, timeout=2.0)
+            await asyncio.wait_for(_worker_task, timeout=3.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+            _worker_task.cancel()
     _worker_task = None
 
 
@@ -177,8 +254,9 @@ def stop_palette_all() -> dict:
         except asyncio.QueueEmpty:
             break
     _batch_total_jobs = _batch_completed_jobs + _batch_failed_jobs + (1 if _current_video_id else 0)
-    logger.warning("Palette STOP: dropped=%d interrupted=%s", dropped, _current_video_id)
-    return {"dropped_queued": dropped, "interrupted_video_id": _current_video_id}
+    killed = kill_running_ffmpeg_procs()
+    logger.warning("Palette STOP: dropped=%d interrupted=%s killed_procs=%d", dropped, _current_video_id, killed)
+    return {"dropped_queued": dropped, "interrupted_video_id": _current_video_id, "killed_procs": killed}
 
 
 async def _worker_loop() -> None:

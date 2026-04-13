@@ -116,7 +116,6 @@ export default function HomePage() {
   }, [q, sort, tag, codec, library, mode, reviewFilter, readyOnly, page]);
 
   useEffect(() => {
-    if (mode !== "library") return;
     if (loading || loadingMore || !hasMore) return;
 
     const target = loadMoreRef.current;
@@ -434,7 +433,7 @@ export default function HomePage() {
           <VideoGrid videos={videos} minCardWidth={tileSize} />
         )}
 
-        {!loading && mode === "library" && !error && (
+        {!loading && !error && (
           <div ref={loadMoreRef} className="flex items-center justify-center py-6">
             {loadingMore ? (
               <span className="text-sm text-white/40">Loading more...</span>

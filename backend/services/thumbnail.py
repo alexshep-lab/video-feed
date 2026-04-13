@@ -10,6 +10,37 @@ from .encoder import build_hw_decode_args
 
 logger = logging.getLogger("videofeed.thumbnail")
 
+# Tracks running ffmpeg procs across all thumbnail/palette threads so that
+# ``kill_running_ffmpeg_procs()`` can interrupt them — otherwise server
+# shutdown and the "Stop" palette button block on whatever ffmpeg is crunching
+# a slow file in a worker thread.
+_running_procs: set[subprocess.Popen] = set()
+
+
+def kill_running_ffmpeg_procs() -> int:
+    """Kill every thumbnail/palette ffmpeg currently running. Returns kill count."""
+    killed = 0
+    for proc in list(_running_procs):
+        try:
+            proc.kill()
+            killed += 1
+        except Exception:
+            pass
+    return killed
+
+
+def _run_one(cmd: list[str]) -> subprocess.CompletedProcess:
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    _running_procs.add(proc)
+    try:
+        out, err = proc.communicate()
+    finally:
+        _running_procs.discard(proc)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
 
 def _run_ffmpeg_with_hw_fallback(
     cmd_builder, label: str
@@ -21,23 +52,14 @@ def _run_ffmpeg_with_hw_fallback(
     """
     hw_args = build_hw_decode_args()
     if hw_args:
-        cmd = cmd_builder(hw_args)
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", check=False,
-        )
+        result = _run_one(cmd_builder(hw_args))
         if result.returncode == 0:
             return result
         logger.warning(
             "%s: HW decode failed (returncode=%s), retrying on CPU. stderr=%s",
             label, result.returncode, (result.stderr or "").strip()[:200],
         )
-
-    cmd = cmd_builder([])
-    return subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", check=False,
-    )
+    return _run_one(cmd_builder([]))
 
 
 def invalidate_video_cache(video_id: str) -> None:

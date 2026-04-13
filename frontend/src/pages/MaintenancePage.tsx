@@ -20,9 +20,17 @@ import {
   stopCompress,
   fetchPaletteStatus,
   fetchPaletteMissingCount,
+  fetchPaletteCandidates,
   generateAllPalettes,
+  generatePaletteOne,
+  generatePalettesBatch,
   stopPalettes,
   PaletteStatus,
+  PaletteSort,
+  fetchOrphans,
+  retryOrphan,
+  retryAllOrphans,
+  OrphanItem,
   ConvertStatus,
   ConvertSort,
   CompressCandidate,
@@ -152,6 +160,60 @@ export default function MaintenancePage() {
   const [paletteMissing, setPaletteMissing] = useState<number | null>(null);
   const [paletteResult, setPaletteResult] = useState<string | null>(null);
   const palettePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [paletteItems, setPaletteItems] = useState<VideoItem[]>([]);
+  const [paletteTotal, setPaletteTotal] = useState(0);
+  const [paletteSelected, setPaletteSelected] = useState<Set<string>>(new Set());
+  const [paletteGeneratingId, setPaletteGeneratingId] = useState<string | null>(null);
+  const [showPaletteList, setShowPaletteList] = useState(false);
+  const PALETTE_PAGE_SIZE = 20;
+  const [palettePage, setPalettePage] = useState(0);
+  const [paletteSort, setPaletteSort] = useState<PaletteSort>("name");
+  const [paletteLoading, setPaletteLoading] = useState(false);
+
+  // Locked / orphan files
+  const [orphans, setOrphans] = useState<OrphanItem[]>([]);
+  const [orphanLoading, setOrphanLoading] = useState(false);
+  const [orphanResult, setOrphanResult] = useState<string | null>(null);
+  const [retryingOrphanId, setRetryingOrphanId] = useState<string | null>(null);
+
+  async function loadOrphans() {
+    setOrphanLoading(true);
+    try {
+      const r = await fetchOrphans();
+      setOrphans(r.items);
+    } catch {
+      return null;
+    } finally {
+      setOrphanLoading(false);
+    }
+  }
+
+  async function handleRetryOrphan(id: string) {
+    setRetryingOrphanId(id);
+    try {
+      const r = await retryOrphan(id);
+      setOrphanResult(`${id.slice(0, 8)}: ${r.status}${r.error ? " — " + r.error : ""}`);
+      if (r.status === "recycled" || r.status === "purged_no_file") {
+        setOrphans((prev) => prev.filter((v) => v.id !== id));
+      }
+    } catch {
+      setOrphanResult(`Failed`);
+    } finally {
+      setRetryingOrphanId(null);
+    }
+  }
+
+  async function handleRetryAllOrphans() {
+    if (!confirm("Retry recycle-to-bin for every locked file?")) return;
+    setOrphanResult("Retrying...");
+    try {
+      const r = await retryAllOrphans();
+      setOrphanResult(`Recycled ${r.recycled}, still locked ${r.still_locked}, purged ${r.purged_no_file}`);
+      await loadOrphans();
+    } catch {
+      setOrphanResult("Failed");
+    }
+  }
 
   // Load lightweight things on mount. The big candidate lists are NOT fetched
   // here — they load lazily when the user expands their respective spoilers.
@@ -202,6 +264,74 @@ export default function MaintenancePage() {
       await loadPaletteMissingCount();
     } catch {
       setPaletteResult("Failed to queue");
+    }
+  }
+
+  async function loadPaletteCandidates(page = palettePage, sort = paletteSort) {
+    setPaletteLoading(true);
+    try {
+      const r = await fetchPaletteCandidates(PALETTE_PAGE_SIZE, page * PALETTE_PAGE_SIZE, sort);
+      setPaletteItems(r.items);
+      setPaletteTotal(r.total);
+    } catch {
+      return null;
+    } finally {
+      setPaletteLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!showPaletteList) return;
+    loadPaletteCandidates(palettePage, paletteSort);
+  }, [showPaletteList, palettePage, paletteSort]);
+
+  function togglePaletteSelected(id: string) {
+    setPaletteSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function selectAllPalette() {
+    setPaletteSelected(new Set(paletteItems.map((v) => v.id)));
+  }
+  function clearPaletteSelection() {
+    setPaletteSelected(new Set());
+  }
+
+  async function handlePaletteOne(video: VideoItem) {
+    setPaletteGeneratingId(video.id);
+    setPaletteResult(`Queuing ${video.original_filename}...`);
+    try {
+      await generatePaletteOne(video.id);
+      setPaletteResult(`Queued ${video.original_filename}`);
+      setPaletteItems((prev) => prev.filter((v) => v.id !== video.id));
+      setPaletteTotal((t) => Math.max(0, t - 1));
+      setPaletteMissing((m) => (m == null ? m : Math.max(0, m - 1)));
+      await loadPaletteStatus();
+    } catch {
+      setPaletteResult(`Failed to queue ${video.original_filename}`);
+    } finally {
+      setPaletteGeneratingId(null);
+    }
+  }
+
+  async function handlePaletteSelected() {
+    if (paletteSelected.size === 0) return;
+    const ids = Array.from(paletteSelected);
+    setPaletteResult(`Queuing ${ids.length} selected...`);
+    try {
+      const r = await generatePalettesBatch(ids);
+      setPaletteResult(`Queued ${r.queued} of ${ids.length} selected`);
+      const queuedSet = new Set(ids);
+      setPaletteItems((prev) => prev.filter((v) => !queuedSet.has(v.id)));
+      setPaletteTotal((t) => Math.max(0, t - r.queued));
+      setPaletteMissing((m) => (m == null ? m : Math.max(0, m - r.queued)));
+      clearPaletteSelection();
+      await loadPaletteStatus();
+    } catch {
+      setPaletteResult(`Failed to queue selected`);
     }
   }
 
@@ -959,6 +1089,56 @@ export default function MaintenancePage() {
 
       <hr className="border-white/10" />
 
+      {/* Locked / orphan files — soft-deleted DB row, file still on disk */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Locked / Orphan Files</h2>
+        <p className="text-xs text-white/40">
+          Видео, у которых строка в БД помечена удалённой, но файл остался на диске
+          (обычно потому, что во время удаления он был залочен стримом).
+        </p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadOrphans} disabled={orphanLoading} className={btnCls}>
+            {orphanLoading ? "Scanning..." : `Find Locked (${orphans.length})`}
+          </button>
+          {orphans.length > 0 && (
+            <button onClick={handleRetryAllOrphans} className={btnCls}>
+              Retry All to Recycle Bin
+            </button>
+          )}
+          {orphanResult && <span className="text-xs text-white/40">{orphanResult}</span>}
+        </div>
+
+        {orphans.length > 0 && (
+          <div className="space-y-2">
+            {orphans.map((v) => (
+              <div
+                key={v.id}
+                className="rounded-2xl border border-white/10 bg-white/[0.04] p-3 flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between"
+              >
+                <div className="min-w-0 space-y-1">
+                  <p className="truncate text-sm text-white">{v.original_filename}</p>
+                  <p className="truncate text-xs text-white/40">{v.original_path}</p>
+                  <p className="text-xs text-white/30">
+                    {formatFileSize(v.file_size)} • soft-deleted {v.deleted_at?.slice(0, 19).replace("T", " ")}
+                  </p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button
+                    onClick={() => handleRetryOrphan(v.id)}
+                    disabled={retryingOrphanId === v.id}
+                    className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {retryingOrphanId === v.id ? "Trying..." : "Retry Recycle"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
       {/* Video palettes (contact sheets) — batch generation */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Video Palettes</h2>
@@ -1016,7 +1196,16 @@ export default function MaintenancePage() {
           <button onClick={handlePaletteGenerateAll} className={btnCls}>
             Generate All Missing ({paletteMissing ?? "?"})
           </button>
-          <button onClick={() => { loadPaletteStatus(); loadPaletteMissingCount(); }} className={btnCls}>
+          <button
+            onClick={handlePaletteSelected}
+            disabled={paletteSelected.size === 0}
+            className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Generate Selected First ({paletteSelected.size})
+          </button>
+          <button onClick={selectAllPalette} className={btnCls}>Select All</button>
+          <button onClick={clearPaletteSelection} className={btnCls}>Clear Selection</button>
+          <button onClick={() => { loadPaletteStatus(); loadPaletteMissingCount(); loadPaletteCandidates(); }} className={btnCls}>
             Refresh
           </button>
           {paletteStatus && (paletteStatus.queue_size > 0 || paletteStatus.current_video_id) && (
@@ -1034,6 +1223,125 @@ export default function MaintenancePage() {
           Uses NVDEC decode when available, otherwise CPU.
         </p>
         {paletteResult && <p className="text-xs text-white/40">{paletteResult}</p>}
+
+        {/* Sort + spoiler toggle row */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <SpoilerToggle
+            open={showPaletteList}
+            onClick={() => setShowPaletteList((v) => !v)}
+            label="candidate list"
+            count={paletteTotal || paletteMissing || 0}
+          />
+          {showPaletteList && (
+            <>
+              <label className="text-xs text-white/45">Sort by:</label>
+              <select
+                value={paletteSort}
+                onChange={(e) => { setPaletteSort(e.target.value as PaletteSort); setPalettePage(0); }}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white focus:outline-none focus:border-accent/50"
+              >
+                <option value="name">Name</option>
+                <option value="size_desc">Largest first</option>
+                <option value="size_asc">Smallest first</option>
+                <option value="duration_desc">Longest first</option>
+                <option value="duration_asc">Shortest first</option>
+              </select>
+              {paletteLoading && <span className="text-xs text-white/40">Loading...</span>}
+            </>
+          )}
+        </div>
+
+        {showPaletteList && paletteItems.length === 0 && !paletteLoading && (
+          <p className="text-sm text-white/40">No videos missing a palette.</p>
+        )}
+        {showPaletteList && paletteItems.length > 0 && (
+          <div className="space-y-3">
+            {paletteItems.map((video) => {
+              const isSelected = paletteSelected.has(video.id);
+              return (
+                <div
+                  key={video.id}
+                  className={`rounded-2xl border p-4 transition ${
+                    isSelected ? "border-accent/50 bg-accent/[0.06]" : "border-white/10 bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex flex-col gap-4 lg:flex-row">
+                    <div className="flex shrink-0 items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => togglePaletteSelected(video.id)}
+                        className="mt-1 h-5 w-5 accent-amber-500 cursor-pointer"
+                      />
+                      <div className="relative h-28 w-full overflow-hidden rounded-2xl border border-white/10 bg-white/5 lg:w-52">
+                        <img
+                          src={video.thumbnail_url}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          onError={(e) => {
+                            (e.currentTarget as HTMLImageElement).style.display = "none";
+                          }}
+                        />
+                        <div className="absolute bottom-2 right-2 rounded-full bg-black/65 px-2.5 py-1 text-xs text-white">
+                          {formatDuration(video.duration)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex min-w-0 flex-1 flex-col gap-3">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="min-w-0 space-y-1">
+                          <p className="truncate text-sm font-medium text-white">{video.original_filename}</p>
+                          <p className="truncate text-xs text-white/35">{video.original_path}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-white/45 lg:justify-end">
+                          <span>{formatFileSize(video.file_size)}</span>
+                          <span>{video.width ?? "?"}x{video.height ?? "?"}</span>
+                          <span>{video.codec ?? "unknown"}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button
+                          onClick={() => handlePaletteOne(video)}
+                          disabled={paletteGeneratingId === video.id}
+                          className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {paletteGeneratingId === video.id ? "Queuing..." : "Generate Palette"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {showPaletteList && paletteTotal > PALETTE_PAGE_SIZE && (
+          <div className="flex items-center justify-between gap-3 pt-2">
+            <button
+              onClick={() => setPalettePage((p) => Math.max(0, p - 1))}
+              disabled={palettePage === 0 || paletteLoading}
+              className={btnCls + " disabled:opacity-40 disabled:cursor-not-allowed"}
+            >
+              &larr; Prev
+            </button>
+            <span className="text-xs text-white/45">
+              Page {palettePage + 1} / {Math.max(1, Math.ceil(paletteTotal / PALETTE_PAGE_SIZE))}
+              {" • "}
+              Showing {palettePage * PALETTE_PAGE_SIZE + 1}-
+              {Math.min((palettePage + 1) * PALETTE_PAGE_SIZE, paletteTotal)} of {paletteTotal}
+            </span>
+            <button
+              onClick={() => setPalettePage((p) => p + 1)}
+              disabled={(palettePage + 1) * PALETTE_PAGE_SIZE >= paletteTotal || paletteLoading}
+              className={btnCls + " disabled:opacity-40 disabled:cursor-not-allowed"}
+            >
+              Next &rarr;
+            </button>
+          </div>
+        )}
       </section>
     </div>
   );

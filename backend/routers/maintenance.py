@@ -33,10 +33,13 @@ from ..services.duplicates import (
 )
 from ..services.encoder import detect_nvenc_available, get_effective_encoder
 from ..services.palette import (
+    SORT_OPTIONS as PALETTE_SORT_OPTIONS,
     count_videos_without_palette,
+    enqueue_batch as enqueue_palette_batch,
     enqueue_missing_palettes,
     enqueue_one as enqueue_palette_one,
     get_palette_status,
+    list_missing_palette_videos,
     start_palette_worker,
     stop_palette_all,
 )
@@ -288,11 +291,49 @@ def palette_missing_count(db: Session = Depends(get_db)) -> dict:
     return {"missing": count_videos_without_palette(db)}
 
 
+@router.get("/palettes/candidates")
+def palette_candidates(
+    request: Request,
+    limit: int = 20,
+    offset: int = 0,
+    sort: str = "name",
+    db: Session = Depends(get_db),
+) -> dict:
+    """Paginated list of videos that don't yet have a contact sheet."""
+    if sort not in PALETTE_SORT_OPTIONS:
+        sort = "name"
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    total, videos = list_missing_palette_videos(db, limit=limit, offset=offset, sort=sort)
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort,
+        "sort_options": PALETTE_SORT_OPTIONS,
+        "items": [to_list_item(request, v).model_dump() for v in videos],
+    }
+
+
+# NOTE: order matters — `/palettes/generate-all` and `/palettes/generate/queue`
+# must precede `/palettes/generate/{video_id}`, otherwise FastAPI matches them
+# as video_id="all"/"queue".
 @router.post("/palettes/generate-all")
 def palette_generate_all(db: Session = Depends(get_db)) -> dict:
     count = enqueue_missing_palettes(db)
     start_palette_worker()
     return {"status": "queued", "count": count}
+
+
+@router.post("/palettes/generate/queue")
+def palette_generate_batch(
+    video_ids: list[str] = Body(..., embed=True),
+) -> dict:
+    """Enqueue an explicit list of IDs in the order given — ‘process selected first’."""
+    queued = enqueue_palette_batch(video_ids)
+    if queued:
+        start_palette_worker()
+    return {"status": "queued", "queued": queued, "requested": len(video_ids)}
 
 
 @router.post("/palettes/generate/{video_id}")
@@ -309,6 +350,101 @@ def palette_generate_one(video_id: str, db: Session = Depends(get_db)) -> dict:
 @router.post("/palettes/stop")
 def palette_stop() -> dict:
     return stop_palette_all()
+
+
+# ---- Locked / orphaned files (soft-deleted DB row, file still on disk) ----
+
+@router.get("/orphans")
+def list_orphans(request: Request, db: Session = Depends(get_db)) -> dict:
+    """Soft-deleted videos whose source file is still on disk.
+
+    Happens when recycle-to-bin failed (file locked by an active stream / open
+    in another app) — we soft-deleted the row as a fallback, but the file
+    never moved. Listed here so the user can retry once the lock is released.
+    """
+    import os
+    from ..models import Video as _V
+    rows = db.query(_V).filter(_V.deleted_at.is_not(None)).order_by(_V.deleted_at.desc()).limit(500).all()
+    items = []
+    for v in rows:
+        try:
+            exists = bool(v.original_path) and os.path.exists(v.original_path)
+        except Exception:
+            exists = False
+        if not exists:
+            continue
+        d = to_list_item(request, v).model_dump()
+        d["deleted_at"] = v.deleted_at.isoformat() if v.deleted_at else None
+        items.append(d)
+    return {"count": len(items), "items": items}
+
+
+@router.post("/orphans/{video_id}/retry")
+def retry_orphan(video_id: str, db: Session = Depends(get_db)) -> dict:
+    """Retry move-to-recycle for a soft-deleted row whose file is still on disk."""
+    import os
+    from pathlib import Path as _P
+    from ..models import Video as _V
+    from ..services.fileops import move_to_recycle_bin
+
+    v = db.get(_V, video_id)
+    if v is None:
+        return {"status": "not_found"}
+    if not v.original_path or not os.path.exists(v.original_path):
+        # Nothing left on disk — purge the DB row fully.
+        from ..models import WatchEvent, WatchProgress
+        db.query(WatchEvent).filter(WatchEvent.video_id == video_id).delete(synchronize_session=False)
+        db.query(WatchProgress).filter(WatchProgress.video_id == video_id).delete(synchronize_session=False)
+        db.delete(v)
+        db.commit()
+        return {"status": "purged_no_file"}
+    try:
+        move_to_recycle_bin(_P(v.original_path))
+    except Exception as e:
+        return {"status": "still_locked", "error": str(e)}
+    from ..models import WatchEvent, WatchProgress
+    db.query(WatchEvent).filter(WatchEvent.video_id == video_id).delete(synchronize_session=False)
+    db.query(WatchProgress).filter(WatchProgress.video_id == video_id).delete(synchronize_session=False)
+    db.delete(v)
+    db.commit()
+    return {"status": "recycled"}
+
+
+@router.post("/orphans/retry-all")
+def retry_orphans_all(db: Session = Depends(get_db)) -> dict:
+    """Retry move-to-recycle for every soft-deleted row whose file is still on disk."""
+    import os
+    from pathlib import Path as _P
+    from ..models import Video as _V, WatchEvent, WatchProgress
+    from ..services.fileops import move_to_recycle_bin
+
+    rows = db.query(_V).filter(_V.deleted_at.is_not(None)).all()
+    recycled = 0
+    still_locked = 0
+    purged_no_file = 0
+    for v in rows:
+        if not v.original_path:
+            continue
+        try:
+            exists = os.path.exists(v.original_path)
+        except Exception:
+            exists = False
+        if not exists:
+            db.query(WatchEvent).filter(WatchEvent.video_id == v.id).delete(synchronize_session=False)
+            db.query(WatchProgress).filter(WatchProgress.video_id == v.id).delete(synchronize_session=False)
+            db.delete(v)
+            purged_no_file += 1
+            continue
+        try:
+            move_to_recycle_bin(_P(v.original_path))
+            db.query(WatchEvent).filter(WatchEvent.video_id == v.id).delete(synchronize_session=False)
+            db.query(WatchProgress).filter(WatchProgress.video_id == v.id).delete(synchronize_session=False)
+            db.delete(v)
+            recycled += 1
+        except Exception:
+            still_locked += 1
+    db.commit()
+    return {"recycled": recycled, "still_locked": still_locked, "purged_no_file": purged_no_file}
 
 
 # ---- Encoder info ----

@@ -240,16 +240,23 @@ def next_video(
 
     # Iterate through the query results, skip until we pass `after`, apply the
     # ready-palette check on the Python side, and return the first matching id.
+    # Iterate in two passes if needed: first try to locate `after` in the
+    # filtered set; if it's not there (e.g. user just toggled confirmed, which
+    # made it fall out of the filter), fall back to returning the first match.
     found_after = after is None
-    # Limit cap to avoid loading everything for huge libraries
+    first_match = None
     for video in db.scalars(statement.limit(5000)):
+        if ready and not _video_is_review_ready(video):
+            continue
         if not found_after:
+            if first_match is None and video.id != after:
+                first_match = video
             if video.id == after:
                 found_after = True
             continue
-        if ready and not _video_is_review_ready(video):
-            continue
         return {"next_id": video.id, "next": to_list_item(request, video).model_dump()}
+    if not found_after and first_match is not None:
+        return {"next_id": first_match.id, "next": to_list_item(request, first_match).model_dump()}
     return {"next_id": None, "next": None}
 
 
@@ -397,13 +404,39 @@ def delete_video(
     if hard and recycle:
         raise HTTPException(status_code=400, detail="Use either hard delete or recycle, not both")
 
+    def _purge_related(vid: str) -> None:
+        # WatchEvent / WatchProgress have a FK to videos.id without CASCADE,
+        # so deleting the Video row would raise IntegrityError on SQLite
+        # unless we clear the child rows first.
+        from ..models import WatchEvent, WatchProgress
+        db.query(WatchEvent).filter(WatchEvent.video_id == vid).delete(synchronize_session=False)
+        db.query(WatchProgress).filter(WatchProgress.video_id == vid).delete(synchronize_session=False)
+
     if recycle:
-        try:
-            p = Path(video.original_path)
-            if p.exists():
-                move_to_recycle_bin(p)
-        except Exception as e:
-            raise HTTPException(500, f"Failed to move file to Recycle Bin: {e}")
+        import time
+        move_error: str | None = None
+        p = Path(video.original_path)
+        # The streaming endpoint may still be holding an open file handle for a
+        # few hundred ms after the browser drops the connection. Retry a few
+        # times before giving up and soft-deleting.
+        if p.exists():
+            for attempt in range(6):
+                try:
+                    move_to_recycle_bin(p)
+                    move_error = None
+                    break
+                except Exception as e:
+                    move_error = str(e)
+                    time.sleep(0.3)
+        if move_error:
+            # File is locked (active stream, open in external player, etc.) —
+            # don't 500. Soft-delete so the row stops surfacing in review;
+            # user can retry once the file handle is released.
+            from datetime import datetime, timezone
+            video.deleted_at = datetime.now(timezone.utc)
+            db.commit()
+            return {"status": "deleted_soft_fallback", "move_error": move_error}
+        _purge_related(video.id)
         db.delete(video)
         db.commit()
         return {"status": "deleted_recycle"}
@@ -415,6 +448,21 @@ def delete_video(
                 os.remove(p)
         except Exception as e:
             raise HTTPException(500, f"Failed to delete file: {e}")
+        # Also drop converted MP4 and cached derivatives (thumb / contact sheet /
+        # preview frames) so disk doesn't leak orphans after a hard delete.
+        try:
+            if video.converted_path:
+                cp = Path(video.converted_path)
+                if cp.exists():
+                    os.remove(cp)
+        except Exception:
+            pass
+        try:
+            from ..services.thumbnail import invalidate_video_cache
+            invalidate_video_cache(video.id)
+        except Exception:
+            pass
+        _purge_related(video.id)
         db.delete(video)
         db.commit()
         return {"status": "deleted_hard"}

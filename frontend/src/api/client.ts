@@ -121,8 +121,9 @@ export async function updateVideo(videoId: string, data: VideoUpdate): Promise<V
   return response.json();
 }
 
-export async function deleteVideo(videoId: string, hard = false, recycle = false): Promise<void> {
-  await fetch(`${API_BASE}/videos/${videoId}?hard=${hard}&recycle=${recycle}`, { method: "DELETE" });
+export async function deleteVideo(videoId: string, hard = false, recycle = false): Promise<{ status?: string; move_error?: string }> {
+  const r = await fetch(`${API_BASE}/videos/${videoId}?hard=${hard}&recycle=${recycle}`, { method: "DELETE" });
+  try { return await r.json(); } catch { return {}; }
 }
 
 export async function startTranscode(videoId: string): Promise<void> {
@@ -357,8 +358,65 @@ export async function generateAllPalettes(): Promise<{ status: string; count: nu
   return r.json();
 }
 
+export type PaletteSort = "name" | "size_desc" | "size_asc" | "duration_desc" | "duration_asc";
+
+export type PaletteCandidatesResponse = {
+  total: number;
+  limit: number;
+  offset: number;
+  sort: PaletteSort;
+  sort_options: Record<string, string>;
+  items: VideoItem[];
+};
+
+export async function fetchPaletteCandidates(
+  limit = 20,
+  offset = 0,
+  sort: PaletteSort = "name",
+): Promise<PaletteCandidatesResponse> {
+  const url = new URL(`${API_BASE}/maintenance/palettes/candidates`);
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("offset", String(offset));
+  url.searchParams.set("sort", sort);
+  const r = await fetch(url);
+  return r.json();
+}
+
+export async function generatePaletteOne(videoId: string): Promise<{ status: string; video_id?: string }> {
+  const r = await fetch(`${API_BASE}/maintenance/palettes/generate/${videoId}`, { method: "POST" });
+  return r.json();
+}
+
+export async function generatePalettesBatch(videoIds: string[]): Promise<{ status: string; queued: number; requested: number }> {
+  const r = await fetch(`${API_BASE}/maintenance/palettes/generate/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ video_ids: videoIds }),
+  });
+  return r.json();
+}
+
 export async function stopPalettes(): Promise<{ dropped_queued: number; interrupted_video_id: string | null }> {
   const r = await fetch(`${API_BASE}/maintenance/palettes/stop`, { method: "POST" });
+  return r.json();
+}
+
+// ---- Locked / orphan files (soft-deleted DB rows whose file is still on disk) ----
+
+export type OrphanItem = VideoItem & { deleted_at: string | null };
+
+export async function fetchOrphans(): Promise<{ count: number; items: OrphanItem[] }> {
+  const r = await fetch(`${API_BASE}/maintenance/orphans`);
+  return r.json();
+}
+
+export async function retryOrphan(videoId: string): Promise<{ status: string; error?: string }> {
+  const r = await fetch(`${API_BASE}/maintenance/orphans/${videoId}/retry`, { method: "POST" });
+  return r.json();
+}
+
+export async function retryAllOrphans(): Promise<{ recycled: number; still_locked: number; purged_no_file: number }> {
+  const r = await fetch(`${API_BASE}/maintenance/orphans/retry-all`, { method: "POST" });
   return r.json();
 }
 
