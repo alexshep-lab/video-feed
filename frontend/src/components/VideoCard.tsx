@@ -10,12 +10,17 @@ type VideoCardProps = {
   video: VideoItem;
   showPath?: boolean;
   showExtraMeta?: boolean;
+  /** Optional query string (without `?`) appended to the watch link. Used by
+   * the review flow on HomePage to propagate the current filter so WatchPage
+   * can auto-advance to the next matching video. */
+  linkQuery?: string;
 };
 
 export default function VideoCard({
   video,
   showPath = false,
   showExtraMeta = false,
+  linkQuery,
 }: VideoCardProps) {
   const [frameIndex, setFrameIndex] = useState(0);
   const [hovered, setHovered] = useState(false);
@@ -46,7 +51,7 @@ export default function VideoCard({
 
   return (
     <Link
-      to={`/watch/${video.id}`}
+      to={`/watch/${video.id}${linkQuery ? `?${linkQuery}` : ""}`}
       className="group overflow-hidden rounded-3xl border border-white/10 bg-panel/70 shadow-card transition hover:-translate-y-1 hover:border-accent/40"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}

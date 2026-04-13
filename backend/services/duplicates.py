@@ -17,41 +17,64 @@ from ..models import Video
 from .thumbnail import generate_thumbnail
 
 
-def file_sha1(path: Path, chunk_size: int = 1024 * 1024) -> str | None:
+_FINGERPRINT_WINDOW = 64 * 1024  # 64 KB from head + 64 KB from tail
+
+
+def file_partial_fingerprint(path: Path, file_size: int) -> str | None:
+    """Fast fingerprint: SHA-1 of (size + first 64 KB + last 64 KB).
+
+    Used as the second-stage check after file-size grouping. For files of
+    identical size, matching head+tail bytes means content match with
+    overwhelming probability — video container headers (and trailing index
+    atoms for MP4) are well within the first/last 64 KB. Hundreds of times
+    faster than hashing the entire file, critical for libraries on slow drives.
+    """
     if not path.exists() or not path.is_file():
         return None
     digest = hashlib.sha1()
-    with path.open("rb") as stream:
-        while True:
-            chunk = stream.read(chunk_size)
-            if not chunk:
-                break
-            digest.update(chunk)
+    digest.update(str(file_size).encode("ascii"))
+    try:
+        with path.open("rb") as stream:
+            head = stream.read(_FINGERPRINT_WINDOW)
+            digest.update(head)
+            if file_size > _FINGERPRINT_WINDOW * 2:
+                # Read the trailing window. Files smaller than 2 MB are entirely
+                # covered by the head read, so no tail seek is needed.
+                stream.seek(max(0, file_size - _FINGERPRINT_WINDOW))
+                tail = stream.read(_FINGERPRINT_WINDOW)
+                digest.update(tail)
+    except OSError:
+        return None
     return digest.hexdigest()
 
 
 def find_size_duration_duplicates(session: Session) -> list[list[Video]]:
-    """Find exact duplicates by file content hash, using file_size as a prefilter."""
+    """Find exact duplicates by partial-content fingerprint, prefiltered by file_size.
+
+    Uses ``file_partial_fingerprint`` for the content check — this is hundreds
+    of times faster than full SHA-1 on multi-GB files and gives the same
+    practical accuracy because file size is already an exact match.
+    """
     videos = session.scalars(
         select(Video).where(Video.deleted_at.is_(None))
     ).all()
 
     size_groups: dict[int, list[Video]] = defaultdict(list)
     for v in videos:
-        if not Path(v.original_path).exists():
-            continue
         if not v.file_size:
+            continue
+        if not Path(v.original_path).exists():
             continue
         size_groups[v.file_size].append(v)
 
     groups: list[list[Video]] = []
-    for same_size_videos in size_groups.values():
+    for file_size, same_size_videos in size_groups.items():
         if len(same_size_videos) < 2:
             continue
 
         hash_groups: dict[str, list[Video]] = defaultdict(list)
         for video in same_size_videos:
-            digest = file_sha1(Path(video.original_path))
+            digest = file_partial_fingerprint(Path(video.original_path), file_size)
             if digest:
                 hash_groups[digest].append(video)
 

@@ -38,6 +38,8 @@ export type VideoItem = {
   compress_status: string;
   compress_progress: number;
   compressed_size: number | null;
+  convert_status: string;
+  convert_progress: number;
   added_at: string;
   tag_list: string[];
   raw_stream_url: string;
@@ -84,6 +86,7 @@ export type VideoFilters = {
   limit?: number;
   confirmed?: boolean;
   favorite?: boolean;
+  ready?: boolean;
 };
 
 export async function fetchVideos(filters: VideoFilters = {}): Promise<VideoItem[]> {
@@ -244,6 +247,133 @@ export async function fetchCompressStatus(): Promise<{
   overall_progress: number;
 }> {
   const r = await fetch(`${API_BASE}/maintenance/compress/status`);
+  return r.json();
+}
+
+export async function stopCompress(): Promise<{ dropped_queued: number; killed_current: boolean; interrupted_video_id: string | null }> {
+  const r = await fetch(`${API_BASE}/maintenance/compress/stop`, { method: "POST" });
+  return r.json();
+}
+
+// ---- Browser-friendly conversion (WMV/AVI -> MP4) ----
+
+export type ConvertStatus = {
+  queue_size: number;
+  current_video_id: string | null;
+  current_video_title: string | null;
+  current_progress: number;
+  worker_running: boolean;
+  batch_total_jobs: number;
+  batch_completed_jobs: number;
+  batch_failed_jobs: number;
+  overall_progress: number;
+  encoder: string;
+};
+
+export async function fetchConvertStatus(): Promise<ConvertStatus> {
+  const r = await fetch(`${API_BASE}/maintenance/convert/status`);
+  return r.json();
+}
+
+export type ConvertSort = "h264_first" | "size_asc" | "size_desc" | "name";
+
+export type ConvertCandidatesResponse = {
+  total: number;
+  eligible: number;
+  limit: number;
+  offset: number;
+  sort: ConvertSort;
+  sort_options: Record<string, string>;
+  items: VideoItem[];
+};
+
+export async function fetchConvertCandidates(
+  limit = 20,
+  offset = 0,
+  sort: ConvertSort = "h264_first",
+): Promise<ConvertCandidatesResponse> {
+  const url = new URL(`${API_BASE}/maintenance/convert/candidates`);
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("offset", String(offset));
+  url.searchParams.set("sort", sort);
+  const r = await fetch(url);
+  return r.json();
+}
+
+export async function convertOne(videoId: string): Promise<{ status: string; video_id?: string; reason?: string }> {
+  const r = await fetch(`${API_BASE}/maintenance/convert/${videoId}`, { method: "POST" });
+  return r.json();
+}
+
+export async function convertAllPending(): Promise<{ status: string; count: number }> {
+  const r = await fetch(`${API_BASE}/maintenance/convert/all`, { method: "POST" });
+  return r.json();
+}
+
+export async function stopConvert(): Promise<{ dropped_queued: number; killed_current: boolean; interrupted_video_id: string | null }> {
+  const r = await fetch(`${API_BASE}/maintenance/convert/stop`, { method: "POST" });
+  return r.json();
+}
+
+export async function convertBatch(videoIds: string[]): Promise<{ status: string; queued: number; skipped: { id: string; reason: string }[] }> {
+  const r = await fetch(`${API_BASE}/maintenance/convert/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ video_ids: videoIds }),
+  });
+  return r.json();
+}
+
+export async function fetchEncoderInfo(): Promise<{ effective: string; nvenc_available: boolean }> {
+  const r = await fetch(`${API_BASE}/maintenance/encoder`);
+  return r.json();
+}
+
+// ---- Video palette (contact sheet) batch generation ----
+
+export type PaletteStatus = {
+  queue_size: number;
+  current_video_id: string | null;
+  current_video_title: string | null;
+  worker_running: boolean;
+  batch_total_jobs: number;
+  batch_completed_jobs: number;
+  batch_failed_jobs: number;
+  overall_progress: number;
+};
+
+export async function fetchPaletteStatus(): Promise<PaletteStatus> {
+  const r = await fetch(`${API_BASE}/maintenance/palettes/status`);
+  return r.json();
+}
+
+export async function fetchPaletteMissingCount(): Promise<{ missing: number }> {
+  const r = await fetch(`${API_BASE}/maintenance/palettes/missing-count`);
+  return r.json();
+}
+
+export async function generateAllPalettes(): Promise<{ status: string; count: number }> {
+  const r = await fetch(`${API_BASE}/maintenance/palettes/generate-all`, { method: "POST" });
+  return r.json();
+}
+
+export async function stopPalettes(): Promise<{ dropped_queued: number; interrupted_video_id: string | null }> {
+  const r = await fetch(`${API_BASE}/maintenance/palettes/stop`, { method: "POST" });
+  return r.json();
+}
+
+// ---- Review-mode auto-advance: next video matching the same filters ----
+
+export async function fetchNextVideo(
+  afterId: string,
+  filters: Omit<VideoFilters, "offset" | "limit"> = {},
+): Promise<{ next_id: string | null; next: VideoItem | null }> {
+  const url = new URL(`${API_BASE}/videos/next`);
+  url.searchParams.set("after", afterId);
+  Object.entries(filters).forEach(([k, v]) => {
+    if (v !== undefined && v !== "" && v !== null) url.searchParams.set(k, String(v));
+  });
+  const r = await fetch(url);
   return r.json();
 }
 

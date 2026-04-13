@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import Hls from "hls.js";
 import {
   API_BASE,
   fetchVideo,
   fetchRecommendations,
+  fetchNextVideo,
   updateVideo,
   deleteVideo,
   startTranscode,
@@ -12,13 +13,19 @@ import {
   recordWatchEvent,
   updateWatchTime,
   type VideoDetail,
+  type VideoFilters,
   type VideoItem,
 } from "../api/client";
 import { formatDuration, formatFileSize } from "../utils/format";
 
 const NON_NATIVE_EXTENSIONS = [".wmv", ".avi"];
 
-function needsTranscode(filename: string): boolean {
+function needsTranscode(video: VideoDetail | VideoItem): boolean {
+  // If browser-friendly conversion is done, the raw stream endpoint serves
+  // the converted MP4 — no HLS transcoding needed, no matter what the
+  // original extension is.
+  if (video.convert_status === "completed") return false;
+  const filename = video.original_filename;
   const ext = filename.toLowerCase().slice(filename.lastIndexOf("."));
   return NON_NATIVE_EXTENSIONS.includes(ext);
 }
@@ -28,7 +35,11 @@ function formatWatchTime(seconds: number): string {
   return formatDuration(seconds);
 }
 
-function rawMimeType(filename: string): string {
+function rawMimeType(video: VideoDetail | VideoItem): string {
+  // When a successful conversion exists, the raw endpoint streams the
+  // converted MP4 regardless of the original file's extension.
+  if (video.convert_status === "completed") return "video/mp4";
+  const filename = video.original_filename;
   const ext = filename.toLowerCase().slice(filename.lastIndexOf("."));
   if (ext === ".webm") return "video/webm";
   if (ext === ".mov") return "video/quicktime";
@@ -38,6 +49,42 @@ function rawMimeType(filename: string): string {
 export default function WatchPage() {
   const { videoId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  // Review-mode context is encoded in the URL by HomePage when clicking from
+  // the unconfirmed list. WatchPage reads it to know whether to auto-advance
+  // after Confirm / Hard Delete, and which filter to pass to the next-video API.
+  const reviewMode = searchParams.get("review") === "1";
+  const reviewFilters: Omit<VideoFilters, "offset" | "limit"> = useMemo(() => {
+    const f: Omit<VideoFilters, "offset" | "limit"> = {};
+    const confirmedParam = searchParams.get("confirmed");
+    if (confirmedParam === "true") f.confirmed = true;
+    else if (confirmedParam === "false") f.confirmed = false;
+    if (searchParams.get("ready") === "true") f.ready = true;
+    const q = searchParams.get("q"); if (q) f.q = q;
+    const tag = searchParams.get("tag"); if (tag) f.tag = tag;
+    const codec = searchParams.get("codec"); if (codec) f.codec = codec;
+    const library = searchParams.get("library"); if (library) f.library = library;
+    const sort = searchParams.get("sort"); if (sort) f.sort = sort;
+    return f;
+  }, [searchParams]);
+
+  async function advanceToNext() {
+    if (!videoId) return;
+    try {
+      const r = await fetchNextVideo(videoId, reviewFilters);
+      if (r.next_id) {
+        // Preserve review-mode query so the chain keeps working
+        navigate(`/watch/${r.next_id}?${searchParams.toString()}`);
+      } else {
+        // Nothing left — go back to the library
+        navigate("/");
+      }
+    } catch {
+      navigate("/");
+    }
+  }
+
   const [video, setVideo] = useState<VideoDetail | null>(null);
   const [recommendations, setRecommendations] = useState<VideoItem[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -93,10 +140,10 @@ export default function WatchPage() {
   // Auto-start transcoding for non-native formats
   useEffect(() => {
     if (!video || !videoId) return;
-    if (needsTranscode(video.original_filename) && video.transcode_status === "pending") {
+    if (needsTranscode(video) && video.transcode_status === "pending") {
       startTranscode(videoId).then(() => load(videoId)).catch(() => null);
     }
-  }, [video?.id, video?.transcode_status, video?.original_filename, videoId]);
+  }, [video?.id, video?.transcode_status, video?.original_filename, video?.convert_status, videoId]);
 
   // Poll while transcoding
   useEffect(() => {
@@ -127,7 +174,7 @@ export default function WatchPage() {
 
   const playerMode = useMemo(() => {
     if (!video) return "none" as const;
-    if (!needsTranscode(video.original_filename) && video.raw_stream_url) return "raw" as const;
+    if (!needsTranscode(video) && video.raw_stream_url) return "raw" as const;
     if (video.transcode_status === "completed" && video.hls_stream_url) return "hls" as const;
     if (video.transcode_status === "processing") return "processing" as const;
     if (video.transcode_status === "failed") return "failed" as const;
@@ -202,7 +249,7 @@ export default function WatchPage() {
   if (error) return <p className="text-red-300">{error}</p>;
   if (!video) return <p className="text-white/60">Loading player...</p>;
 
-  const isNativePlayback = !needsTranscode(video.original_filename);
+  const isNativePlayback = !needsTranscode(video);
   const isTranscoding = video.transcode_status === "processing";
 
   async function toggleFavorite() {
@@ -215,6 +262,12 @@ export default function WatchPage() {
     if (!video || !videoId) return;
     const updated = await updateVideo(videoId, { confirmed: !video.confirmed });
     setVideo(updated);
+    // In review mode, a confirm is the "done with this one" gesture — jump
+    // straight to the next video matching the same filter so the user doesn't
+    // have to navigate back to the library each time.
+    if (reviewMode && !video.confirmed && updated.confirmed) {
+      await advanceToNext();
+    }
   }
 
   async function saveTags() {
@@ -250,7 +303,11 @@ export default function WatchPage() {
     if (!videoId) return;
     if (!confirm("Permanently delete file from disk?")) return;
     await deleteVideo(videoId, true);
-    navigate("/");
+    if (reviewMode) {
+      await advanceToNext();
+    } else {
+      navigate("/");
+    }
   }
 
   const btnCls = "rounded-xl border border-white/15 bg-white/5 px-4 py-1.5 text-sm text-white/80 hover:bg-white/10 transition";
@@ -258,6 +315,20 @@ export default function WatchPage() {
 
   return (
     <section className="space-y-6">
+      {reviewMode && (
+        <div className="flex items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
+          <span>
+            <span className="font-semibold">Review mode.</span>
+            {" "}Confirm / Hard Delete will jump to the next matching video.
+          </span>
+          <button
+            onClick={() => navigate("/")}
+            className="rounded-lg border border-white/15 bg-white/5 px-3 py-1 text-xs text-white/70 hover:bg-white/10 transition"
+          >
+            Exit review
+          </button>
+        </div>
+      )}
       <div className="overflow-hidden rounded-[2rem] border border-white/10 bg-black shadow-card">
         {playerMode === "raw" || playerMode === "hls" ? (
           <div className="space-y-3 p-3">
@@ -271,7 +342,7 @@ export default function WatchPage() {
               className="max-h-[75vh] w-full rounded-[1.5rem] bg-black"
             >
               {playerMode === "raw" && video.raw_stream_url ? (
-                <source src={video.raw_stream_url} type={rawMimeType(video.original_filename)} />
+                <source src={video.raw_stream_url} type={rawMimeType(video)} />
               ) : null}
             </video>
             {playerError ? (

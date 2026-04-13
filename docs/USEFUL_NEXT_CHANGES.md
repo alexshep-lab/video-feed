@@ -1,222 +1,146 @@
 # VideoFeed: Useful Next Changes
 
-This document lists the most useful next changes based on the implemented work and the current library profile.
+What's still open, with a rough priority order at the bottom. The items from
+the original list that have since shipped (WMV conversion, NVENC/NVDEC,
+palette pre-generation, Stop buttons, review mode, compression policy basics)
+are no longer here — see `IMPLEMENTED_CHANGES.md`.
 
-## 1. WMV Playback Strategy
+## 1. Compression Policy — Smarter Candidate Scoring
 
-This project has many WMV files. Those files are a poor fit for direct browser playback, so the best next step is to make them playable immediately without waiting for manual action.
+Compression currently triggers on raw height > threshold. More useful filters:
 
-Recommended direction:
+- Add a **minimum file size** threshold (skip files below e.g. 50 MB — they
+  won't compress meaningfully anyway).
+- **Codec-aware**: an already-efficient `h264` file at 1440p isn't always
+  worth recompressing.
+- **Bitrate-based scoring**: a 2160p clip encoded at 5 Mbps barely saves
+  anything; a 1440p clip at 30 Mbps is a great target.
+- **Estimated savings** shown before queueing (rough heuristic from source
+  bitrate vs target bitrate).
 
-- Detect WMV files during scan.
-- Automatically queue them for background conversion into browser-friendly MP4.
-- Store converted output alongside the DB record.
-- Prefer converted MP4 immediately on the watch page.
-- Keep the original WMV file until the converted file is validated.
+Same idea as what already exists for the convert / remux split (H.264 →
+fast path), just extended to compression targets.
 
-Good target:
+## 2. Per-Video Compression Audit Log
 
-- video: H.264
-- audio: AAC
-- container: MP4
-- `+faststart` enabled
+For each compression job, store enough to explain later what happened:
 
-Expected benefit:
+- source filename / target filename
+- source size / target size
+- time spent
+- encoder used (libx264 vs h264_nvenc)
+- whether HW decode was active
+- source archived path
+- whether the row was merged into an existing target row
 
-- WMV opens like normal video
-- fewer silent playback failures
-- no manual transcoding button needed for common legacy formats
+Surface on the watch page ("Compressed on 2026-04-10, 4.2 GB → 1.3 GB via
+h264_nvenc") and as a job history page in Maintenance.
 
-## 2. GPU Acceleration for RTX 2080
+## 3. Rebuild / Repair Derived Assets
 
-Right now many heavy media operations are CPU-bound:
+One-click maintenance actions for each derived asset kind:
 
-- WMV conversion
-- HLS/transcode generation
-- compression
-- some thumbnail / frame generation workflows
+- Rebuild missing **thumbnails**
+- Rebuild missing **preview frames** (the 8-frame hover set)
+- Rebuild missing **contact sheets** ← already shipped as "Generate All
+  Missing (N)"; the thumbnail / preview-frame variants are the same pattern
+- Rebuild failed / stale **conversions**
 
-With an RTX 2080, the highest-impact improvement is NVIDIA acceleration through FFmpeg.
+Useful after:
 
-Recommended work:
-
-- add backend setting for preferred encoder mode:
-  - `cpu`
-  - `nvidia`
-- support FFmpeg NVDEC/NVENC when available
-- use:
-  - `h264_nvenc` for MP4 output
-  - optional CUDA hardware decode when supported by source codec
-- keep CPU fallback when GPU path is unavailable
-
-Typical GPU-oriented commands would be based on:
-
-- `-hwaccel cuda`
-- `-c:v h264_nvenc`
-
-Important note:
-
-- Some frame extraction operations may still be cheaper or simpler on CPU.
-- The biggest wins will come from long-running conversion and compression jobs, not from every single thumbnail call.
-
-## 3. Pre-generate Contact Sheets During Scan
-
-Frame palettes currently generate lazily.
-
-Recommended next step:
-
-- generate contact sheets during scan for:
-  - new videos
-  - videos missing contact sheet
-- optionally skip for confirmed videos if storage is a concern
-- optionally generate only for:
-  - videos under a size threshold
-  - videos under a duration threshold
-  - unconfirmed videos
-
-Expected benefit:
-
-- watch page shows palette instantly
-- easier moderation and review workflow
-- no confusion about whether palette generation happened
-
-## 4. Explicit Media Cache Status
-
-It would help to show media cache state in the UI or logs:
-
-- thumbnail exists / missing
-- preview frames ready / partial / missing
-- contact sheet ready / missing
-- compressed version ready / missing
-- HLS ready / missing
-
-Useful additions:
-
-- backend endpoint for asset readiness
-- maintenance card for rebuilding missing derived assets
-- logs like:
-  - `contact-sheet generated`
-  - `contact-sheet served from cache`
-  - `thumbnail regenerated`
-
-## 5. Rebuild Derived Media Assets
-
-A useful maintenance feature would be:
-
-- `Rebuild missing thumbnails`
-- `Rebuild preview frames`
-- `Rebuild contact sheets`
-- `Rebuild WMV conversions`
-
-This is especially useful after:
-
-- path moves
+- path moves (previously-cached sheets now point at dead sources)
 - scanner fixes
 - codec pipeline upgrades
 - FFmpeg config changes
 
-## 6. Compression Policy Improvements
+## 4. Parallel Worker Slots
 
-Compression now works better, but the policy can be improved further.
+Single-worker compressor / converter / palette batches leave NVENC and NVDEC
+partially idle (especially when mixed with CPU-decoded files where NVDEC
+falls back). Adding a configurable concurrency (e.g. 2–3 slots) would:
 
-Recommended improvements:
+- push GPU utilization closer to 100% on long batches
+- hide CPU-decode latency behind other GPU work
+- cut total batch time by ~2× on RTX 2080
 
-- add minimum file size threshold
-  - for example skip files smaller than 50 MB or 100 MB
-- add codec-aware filtering
-  - for example avoid recompressing already efficient H.264 encodes unless they are very large
-- add bitrate-based candidate scoring
-- add estimated savings before queueing
+Caveats:
 
-Expected benefit:
+- consumer NVENC has a session limit (3 on Turing without patch)
+- SQLAlchemy sessions need to stop being shared between workers
+- the "current_video_id" + "current_proc" globals become lists
 
-- avoids useless compression of tiny files
-- makes queue more meaningful
+## 5. GPU-Aware Preview Frames / Thumbnail Pipeline
 
-## 7. Per-Video Compression Audit
+Thumbnails and preview frames already use `-hwaccel cuda` when available.
+Further wins:
 
-For each compression job, it would be useful to store:
+- `-hwaccel_output_format cuda` keeps frames in GPU memory → only
+  `hwdownload` at the very end before JPEG encode.
+- `scale_cuda` instead of CPU `scale` before download.
 
-- source filename
-- target filename
-- source size
-- target size
-- time spent
-- encoder used
-- whether GPU or CPU was used
-- source archived path
+These are more fragile (filter-graph compatibility varies across ffmpeg
+builds), so they should be opt-in / benchmarked.
 
-This could be shown:
+## 6. Richer Review Workspace
 
-- in maintenance
-- on watch page
-- in a future job history page
+Review mode exists and auto-advances. Ideas to make it more keyboard-first:
 
-## 8. GPU-aware Thumbnail and Preview Pipeline
+- Hotkeys: **Y** confirm, **N** hard delete, **←** previous, **→** next,
+  **space** toggle play, **F** favorite.
+- Quick-tag chips for common categories (one click adds/removes).
+- Duplicate-warning badge in review cards ("also matches file X").
+- Sort-by-newest-scanned option (catch what just arrived).
+- Sort-by-contact-sheet-generated-at (review the most recently readied
+  videos first).
 
-Even if not every single image job needs GPU, it may still be worth adding configurable acceleration for:
+## 7. Better Logging and Job Diagnostics
 
-- preview frame extraction
-- contact sheet generation
+Each media pipeline already logs to stdout. Useful additions:
 
-Recommended approach:
+- Structured per-job log lines (one JSON line per finished job) for later
+  aggregation.
+- Explicit log of the full ffmpeg command invoked (helps reproduce failures
+  by hand).
+- Save stderr/stdout of *failed* jobs to `media/logs/{video_id}.txt`.
+- Expose `last_error` on the Video row so the maintenance UI can show
+  "why did this one fail?" inline.
 
-- keep current CPU pipeline as default safe mode
-- add optional GPU mode
-- benchmark on your system before forcing it globally
+## 8. Watch-Progress API and "Continue Watching"
 
-Because your system is:
+The `WatchProgress` model exists but the router is not wired up. Missing:
 
-- Intel i7-8700
-- 32 GB RAM
-- NVIDIA GeForce RTX 2080 8 GB
+- `GET /api/progress/{id}` — current position
+- `PUT /api/progress/{id}` — save position (called every ~5 s from player)
+- `GET /api/progress/continue-watching` — list of partially-watched videos
+- HomePage section "Continue watching" at the top when items exist
+- WatchPage resume-prompt: "Resume from 14:32?"
 
-the GPU path is likely worth it for long-running video tasks.
+## 9. Search via SQLite FTS5
 
-## 9. Better Review Workspace
+`ILIKE %q%` handles the current library fine but gets slower as the library
+grows past ~10k rows and doesn't do prefix/stemming/fuzzy. FTS5 over
+`title + original_filename + tags + category` would be a strict upgrade.
 
-Review mode can be expanded into a more dedicated moderation workspace.
+## 10. HLS: Prefer Over Raw for Large / Mid-Bitrate Content
 
-Useful additions:
+Right now HLS is only used when the browser can't natively play the file.
+For big 4K H.264 files on slow networks, serving HLS (even just a single
+720p/1080p variant) could give better playback. Needs a policy:
 
-- keyboard shortcuts
-  - confirm
-  - unconfirm
-  - next
-  - trash
-  - open
-- visible contact sheet directly in the card
-- quick tags for common categories
-- duplicate warnings in review flow
-- sort by newest scanned
-
-## 10. Better Logging and Job Diagnostics
-
-Media pipelines are hard to debug without clear logs.
-
-Useful next improvements:
-
-- structured compression logs
-- explicit ffmpeg command logging
-- log whether GPU path or CPU path was chosen
-- save stderr/stdout on failed jobs
-- expose last error message in maintenance UI
-
-That would make it much easier to answer:
-
-- did conversion start
-- did it use GPU
-- did it finish
-- if it failed, why
+- Auto-transcode to HLS if `file_size > X` *and* `width >= 1920`?
+- User override: "Play HLS anyway" in the watch page?
 
 ## 11. Recommended Priority Order
 
 If doing this in a practical order, the most valuable sequence is:
 
-1. Auto-convert WMV to MP4 for browser playback.
-2. Add GPU/NVENC pipeline for conversion and compression.
-3. Pre-generate contact sheets during scan.
-4. Add min-size rule for compression candidates.
-5. Add rebuild-derived-assets maintenance tools.
-6. Add better job diagnostics and failure surfacing.
-
+1. Watch progress API + "Continue watching" (low effort, high UX).
+2. Rebuild missing derived assets (makes the library heal itself after
+   messy imports).
+3. Per-video compression audit log (ties the existing merge/soft-delete
+   logic to visible history).
+4. Smarter compression policy (avoids wasted CPU/GPU time on negligible
+   gains).
+5. Review mode hotkeys (speeds up what's already shipping).
+6. Parallel worker slots (the big throughput lever; most code reuse).
+7. Better logging (pays off once any of the above are in heavy use).

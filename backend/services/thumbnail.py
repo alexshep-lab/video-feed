@@ -1,10 +1,70 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import subprocess
 from pathlib import Path
 
 from ..config import get_settings
+from .encoder import build_hw_decode_args
+
+logger = logging.getLogger("videofeed.thumbnail")
+
+
+def _run_ffmpeg_with_hw_fallback(
+    cmd_builder, label: str
+) -> subprocess.CompletedProcess:
+    """Run ffmpeg first with HW decode args, fall back to pure CPU on failure.
+
+    `cmd_builder` is a callable that takes a list of pre-input args (e.g.
+    ``["-hwaccel", "cuda"]`` or ``[]``) and returns the full ffmpeg argv.
+    """
+    hw_args = build_hw_decode_args()
+    if hw_args:
+        cmd = cmd_builder(hw_args)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=False,
+        )
+        if result.returncode == 0:
+            return result
+        logger.warning(
+            "%s: HW decode failed (returncode=%s), retrying on CPU. stderr=%s",
+            label, result.returncode, (result.stderr or "").strip()[:200],
+        )
+
+    cmd = cmd_builder([])
+    return subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=False,
+    )
+
+
+def invalidate_video_cache(video_id: str) -> None:
+    """Drop every cached derived asset for a video so the next request regenerates.
+
+    Used when the source file content changes (compression, conversion, manual
+    re-encode) — the cached thumbnail / contact sheet / preview frames were
+    generated from the old content and no longer match.
+    """
+    settings = get_settings()
+    targets: list[Path] = [
+        settings.thumbnails_dir / f"{video_id}.jpg",
+        settings.media_dir / "contact_sheets" / f"{video_id}.jpg",
+    ]
+    for target in targets:
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    frame_dir = settings.preview_frames_dir / video_id
+    if frame_dir.exists() and frame_dir.is_dir():
+        for child in frame_dir.iterdir():
+            try:
+                child.unlink()
+            except OSError:
+                pass
 
 
 def generate_thumbnail(video_path: Path, video_id: str, duration: float | None) -> Path:
@@ -35,30 +95,23 @@ def ensure_frame(video_path: Path, target: Path, timestamp: float) -> Path:
     if target.exists() and target.stat().st_size > 0:
         return target
 
-    command = [
-        settings.ffmpeg_binary,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-ss",
-        f"{timestamp:.3f}",
-        "-i",
-        str(video_path),
-        "-frames:v",
-        "1",
-        "-q:v",
-        "2",
-        "-y",
-        str(target),
-    ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    def build(hw_args: list[str]) -> list[str]:
+        # -ss before -i is "fast seek" — much cheaper than decoding from start.
+        # When HW decode is enabled it must come before -ss/-i too.
+        return [
+            settings.ffmpeg_binary,
+            "-hide_banner",
+            "-loglevel", "error",
+            *hw_args,
+            "-ss", f"{timestamp:.3f}",
+            "-i", str(video_path),
+            "-frames:v", "1",
+            "-q:v", "2",
+            "-y",
+            str(target),
+        ]
+
+    completed = _run_ffmpeg_with_hw_fallback(build, label=f"ensure_frame {target.name}")
     if completed.returncode != 0 or not target.exists():
         raise RuntimeError(completed.stderr.strip() or "ffmpeg failed to generate preview")
     return target
@@ -94,7 +147,12 @@ def generate_contact_sheet(
     rows: int = 4,
     tile_width: int = 480,
 ) -> Path:
-    """Generate a single image with a grid of frames (16 frames at 4x4 default)."""
+    """Generate a single image with a grid of frames (16 frames at 4x4 default).
+
+    Decode is offloaded to NVDEC when CUDA hwaccel is available — this is the
+    big win for contact sheets, because the ``select`` filter forces ffmpeg
+    to walk the *entire* video to count frames. CPU fallback is automatic.
+    """
     settings = get_settings()
     target = settings.media_dir / "contact_sheets" / f"{video_id}.jpg"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -106,33 +164,27 @@ def generate_contact_sheet(
         duration = 1.0
 
     n = cols * rows
-    # Use ffmpeg select filter to extract evenly distributed frames + tile filter
-    # interval ensures we skip the first and last 5%
-    start = duration * 0.05
-    end = duration * 0.95
-    if end <= start:
-        end = duration
-    interval = (end - start) / n
+    # Pick every Nth frame so we end up with ~n frames spread across the file.
+    # Assumes ~25fps as a rough constant; exact accuracy isn't critical for a thumbnail grid.
+    every_nth = max(1, int(duration * 25 / n))
+    vf = f"select='not(mod(n\\,{every_nth}))',scale={tile_width}:-2,tile={cols}x{rows}"
 
-    # Build a complex filter: extract n frames at even intervals, scale, tile
-    select_expr = "+".join([f"eq(n\\,{int((start + i * interval) * 25)})" for i in range(n)])
-    # Simpler approach: use fps filter
-    cmd = [
-        settings.ffmpeg_binary,
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", str(video_path),
-        "-vf", f"select='not(mod(n\\,{max(1, int(duration * 25 / n))}))',scale={tile_width}:-2,tile={cols}x{rows}",
-        "-frames:v", "1",
-        "-vsync", "vfr",
-        "-q:v", "3",
-        "-y",
-        str(target),
-    ]
-    completed = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", check=False,
-    )
+    def build(hw_args: list[str]) -> list[str]:
+        return [
+            settings.ffmpeg_binary,
+            "-hide_banner",
+            "-loglevel", "error",
+            *hw_args,
+            "-i", str(video_path),
+            "-vf", vf,
+            "-frames:v", "1",
+            "-vsync", "vfr",
+            "-q:v", "3",
+            "-y",
+            str(target),
+        ]
+
+    completed = _run_ffmpeg_with_hw_fallback(build, label=f"contact_sheet {video_id}")
     if completed.returncode != 0 or not target.exists():
         raise RuntimeError(completed.stderr.strip() or "ffmpeg contact sheet failed")
     return target

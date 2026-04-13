@@ -30,6 +30,8 @@ class VideoBase(BaseModel):
     compress_status: str = "none"
     compress_progress: float = 0.0
     compressed_size: int | None = None
+    convert_status: str = "none"
+    convert_progress: float = 0.0
     added_at: datetime
     tag_list: list[str] = Field(default_factory=list)
 

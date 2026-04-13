@@ -18,14 +18,16 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
+from .encoder import build_quality_video_args, get_effective_encoder
 from .metadata import extract_video_metadata
-from .thumbnail import generate_thumbnail
+from .thumbnail import generate_contact_sheet, generate_thumbnail, invalidate_video_cache
 
 logger = logging.getLogger("videofeed.compressor")
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
 _worker_task: asyncio.Task | None = None
 _current_video_id: str | None = None
+_current_proc: asyncio.subprocess.Process | None = None
 _batch_total_jobs = 0
 _batch_completed_jobs = 0
 _batch_failed_jobs = 0
@@ -88,7 +90,11 @@ def get_oversized_candidates(session: Session, min_height: int = 1440, force: bo
         statement = statement.where(Video.compress_status.not_in(["processing", "pending"]))
     else:
         statement = statement.where(Video.compress_status.in_(["none", "failed"]))
-    return session.scalars(statement).all()
+
+    candidates = session.scalars(statement).all()
+    # Drop rows whose physical file is gone (e.g. user deleted manually).
+    # Cheap stat() per row — for ~hundreds of candidates this is sub-second.
+    return [v for v in candidates if v.original_path and Path(v.original_path).exists()]
 
 
 def count_oversized_candidates(session: Session, min_height: int = 1440, force: bool = False) -> int:
@@ -147,6 +153,49 @@ def start_compress_worker() -> None:
     _worker_task = asyncio.create_task(_worker_loop())
 
 
+def stop_compress_all() -> dict:
+    """Stop everything: drain the queue, kill the active ffmpeg, reset tracking.
+
+    The worker task itself stays alive and idle so subsequent enqueues
+    still work. Returns counts of what was affected for the caller to
+    show to the user.
+    """
+    global _batch_total_jobs
+    dropped = 0
+    while True:
+        try:
+            _queue.get_nowait()
+            _queue.task_done()
+            dropped += 1
+        except asyncio.QueueEmpty:
+            break
+
+    killed = False
+    if _current_proc is not None and _current_proc.returncode is None:
+        try:
+            _current_proc.kill()
+            killed = True
+        except ProcessLookupError:
+            pass
+
+    # Keep completed + failed counts so the UI still reflects what was done,
+    # but shrink the "total" so the progress bar doesn't sit at an impossible
+    # intermediate value forever.
+    _batch_total_jobs = _batch_completed_jobs + _batch_failed_jobs + (1 if _current_video_id else 0)
+
+    interrupted_id = _current_video_id
+    if interrupted_id:
+        _update_status(interrupted_id, "failed", 0.0)
+
+    logger.warning("Compress STOP: dropped=%d killed_current=%s interrupted=%s",
+                   dropped, killed, interrupted_id)
+    return {
+        "dropped_queued": dropped,
+        "killed_current": killed,
+        "interrupted_video_id": interrupted_id,
+    }
+
+
 async def stop_compress_worker() -> None:
     global _worker_task
     if _worker_task and not _worker_task.done():
@@ -159,7 +208,7 @@ async def stop_compress_worker() -> None:
 
 
 async def _worker_loop() -> None:
-    global _current_video_id, _batch_completed_jobs, _batch_failed_jobs
+    global _current_video_id, _current_proc, _batch_completed_jobs, _batch_failed_jobs
     logger.info("Compress worker started")
     while True:
         video_id = await _queue.get()
@@ -175,6 +224,7 @@ async def _worker_loop() -> None:
             _batch_failed_jobs += 1
         finally:
             _current_video_id = None
+            _current_proc = None
             _queue.task_done()
 
 
@@ -186,7 +236,17 @@ async def _compress_video(video_id: str) -> None:
             return
         src = Path(video.original_path)
         if not src.exists():
-            _update_status(video_id, "failed", 0.0)
+            # Source file disappeared (user deleted manually, etc.). Soft-delete the
+            # row so it stops cluttering candidate lists; archived copy may still exist.
+            from datetime import datetime, timezone
+            video.deleted_at = datetime.now(timezone.utc)
+            video.compress_status = "failed"
+            video.compress_progress = 0.0
+            session.commit()
+            logger.warning(
+                "Compress %s: source file missing (%s), soft-deleted DB row",
+                video_id, src,
+            )
             return
         duration = video.duration or 0
 
@@ -195,6 +255,8 @@ async def _compress_video(video_id: str) -> None:
 
     _update_status(video_id, "processing", 0.0)
 
+    encoder_args = build_quality_video_args(crf_or_cq=CRF, preset=PRESET)
+    encoder_name = get_effective_encoder()
     cmd = [
         settings.ffmpeg_binary,
         "-hide_banner",
@@ -203,21 +265,22 @@ async def _compress_video(video_id: str) -> None:
         "-progress", "pipe:2",
         "-i", str(src),
         "-vf", f"scale='min(1920,iw)':'min({TARGET_HEIGHT},ih)':force_original_aspect_ratio=decrease",
-        "-c:v", "libx264",
-        "-preset", PRESET,
-        "-crf", str(CRF),
+        *encoder_args,
         "-c:a", "aac",
         "-b:a", AUDIO_BITRATE,
         "-movflags", "+faststart",
         "-y",
         str(out_path),
     ]
+    logger.info("Compressing %s using encoder=%s", video_id, encoder_name)
 
+    global _current_proc
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    _current_proc = proc
 
     while True:
         line = await proc.stderr.readline()
@@ -232,9 +295,16 @@ async def _compress_video(video_id: str) -> None:
             _update_status(video_id, "processing", round(pct, 1))
 
     await proc.wait()
+    _current_proc = None
 
     if proc.returncode != 0 or not out_path.exists():
         _update_status(video_id, "failed", 0.0)
+        # Clean up partial output from a killed or failed run
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except OSError:
+                pass
         return
 
     new_size = out_path.stat().st_size
@@ -247,27 +317,66 @@ async def _compress_video(video_id: str) -> None:
 
     with SessionLocal() as session:
         video = session.get(Video, video_id)
-        if video:
-            video.original_path = str(out_path)
-            video.original_filename = out_path.name
-            video.library_path = str(out_path.parent)
-            video.file_size = new_size
-            video.file_mtime = out_path.stat().st_mtime
-            video.duration = new_metadata.get("duration", video.duration)
-            video.width = new_metadata.get("width", video.width)
-            video.height = new_metadata.get("height", video.height)
-            video.codec = new_metadata.get("codec", video.codec)
-            video.is_vertical = new_metadata.get("is_vertical", video.is_vertical)
-            video.compress_status = "completed"
-            video.compress_progress = 100.0
-            video.compressed_path = str(out_path)
-            video.compressed_size = new_size
-            try:
-                thumbnail = generate_thumbnail(out_path, video.id, video.duration)
-                video.thumbnail_path = str(thumbnail)
-            except Exception:
-                pass
+        if not video:
+            return
+
+        # Check whether the compressed output path is already owned by another
+        # video row (happens when the FHD version had been imported as its own
+        # entry before the source was compressed). Without this we'd hit
+        # "UNIQUE constraint failed: videos.original_path" on UPDATE.
+        target_collision = session.scalar(
+            select(Video).where(
+                Video.original_path == str(out_path),
+                Video.id != video_id,
+            )
+        )
+
+        if target_collision is not None:
+            logger.warning(
+                "Compress %s: target path %s already belongs to %s — merging into existing row",
+                video_id, out_path, target_collision.id,
+            )
+            _merge_into_existing(session, video, target_collision, out_path, new_size, new_metadata)
             session.commit()
+            logger.info(
+                "Compressed %s -> %s (%d bytes, merged into %s)",
+                video_id, out_path, new_size, target_collision.id,
+            )
+            return
+
+        video.original_path = str(out_path)
+        video.original_filename = out_path.name
+        video.library_path = str(out_path.parent)
+        video.file_size = new_size
+        video.file_mtime = out_path.stat().st_mtime
+        video.duration = new_metadata.get("duration", video.duration)
+        video.width = new_metadata.get("width", video.width)
+        video.height = new_metadata.get("height", video.height)
+        video.codec = new_metadata.get("codec", video.codec)
+        video.is_vertical = new_metadata.get("is_vertical", video.is_vertical)
+        video.compress_status = "completed"
+        video.compress_progress = 100.0
+        video.compressed_path = str(out_path)
+        video.compressed_size = new_size
+
+        # Drop cached thumbnail / contact sheet / preview frames generated from
+        # the *old* source file. Without this, ensure_frame() returns the stale
+        # cached image because it short-circuits on `target.exists()`.
+        invalidate_video_cache(video.id)
+        try:
+            thumbnail = generate_thumbnail(out_path, video.id, video.duration)
+            video.thumbnail_path = str(thumbnail)
+        except Exception:
+            pass
+        # Eagerly pre-generate the contact sheet now while we already have the
+        # file in disk cache. Lazy generation on first WatchPage open is *very*
+        # slow on remote drives because select-filter walks the entire file —
+        # doing it here in the worker keeps user requests instant.
+        try:
+            generate_contact_sheet(out_path, video.id, video.duration)
+        except Exception:
+            logger.warning("Failed to pre-generate contact sheet for %s", video_id)
+        session.commit()
     logger.info(
         "Compressed %s -> %s (%d bytes), archived original to %s",
         video_id,
@@ -275,6 +384,85 @@ async def _compress_video(video_id: str) -> None:
         new_size,
         archive_path,
     )
+
+
+def _merge_into_existing(
+    session,
+    source: Video,
+    target: Video,
+    out_path: Path,
+    new_size: int,
+    new_metadata: dict,
+) -> None:
+    """Fold a freshly-compressed video into a pre-existing row at the same path.
+
+    Used when compressor's output filename collides with an already-indexed
+    video record (e.g. user manually placed the FHD copy next to the 4K source
+    earlier, and both got scanned as separate rows).
+
+    Behavior:
+      - Target's file metadata is refreshed (its file content was just rewritten by ffmpeg -y)
+      - View counts, watch time, favorite/confirmed flags are merged from source
+      - Tags from source are added to target
+      - Source row is soft-deleted (its physical file is already in the archive)
+    """
+    from datetime import datetime, timezone
+
+    # Refresh target metadata — its on-disk file was overwritten by the new compress output
+    target.file_size = new_size
+    try:
+        target.file_mtime = out_path.stat().st_mtime
+    except OSError:
+        pass
+    target.duration = new_metadata.get("duration", target.duration)
+    target.width = new_metadata.get("width", target.width)
+    target.height = new_metadata.get("height", target.height)
+    target.codec = new_metadata.get("codec", target.codec)
+    target.is_vertical = new_metadata.get("is_vertical", target.is_vertical)
+    target.compress_status = "completed"
+    target.compress_progress = 100.0
+    target.compressed_path = str(out_path)
+    target.compressed_size = new_size
+
+    # Cherry-pick stats and flags from the source record
+    target.view_count = max(target.view_count or 0, source.view_count or 0)
+    target.total_watch_time = max(target.total_watch_time or 0.0, source.total_watch_time or 0.0)
+    if source.last_watched_at and (
+        not target.last_watched_at or source.last_watched_at > target.last_watched_at
+    ):
+        target.last_watched_at = source.last_watched_at
+    if source.favorite:
+        target.favorite = True
+    if source.confirmed:
+        target.confirmed = True
+
+    # Merge tags (many-to-many)
+    existing_tag_ids = {t.id for t in target.tag_objects}
+    for tag in source.tag_objects:
+        if tag.id not in existing_tag_ids:
+            target.tag_objects.append(tag)
+
+    # Refresh target derived assets since the on-disk file content changed.
+    # Drop the stale cache first, then regenerate eagerly so the user doesn't
+    # pay the contact-sheet generation cost on the next WatchPage open.
+    invalidate_video_cache(target.id)
+    try:
+        thumbnail = generate_thumbnail(out_path, target.id, target.duration)
+        target.thumbnail_path = str(thumbnail)
+    except Exception:
+        pass
+    try:
+        generate_contact_sheet(out_path, target.id, target.duration)
+    except Exception:
+        logger.warning("Failed to pre-generate contact sheet for merged %s", target.id)
+
+    # Drop the source row's cached assets too — they're orphans now.
+    invalidate_video_cache(source.id)
+
+    # Soft-delete source row — its physical file is now in the archive
+    source.deleted_at = datetime.now(timezone.utc)
+    source.compress_status = "completed"
+    source.compress_progress = 100.0
 
 
 def _update_status(video_id: str, status: str, progress: float) -> None:

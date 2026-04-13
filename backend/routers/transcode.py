@@ -13,8 +13,17 @@ router = APIRouter(prefix="/transcode", tags=["library"])
 
 
 @router.post("/scan", response_model=ScanResult)
-def scan_videos(db: Session = Depends(get_db)) -> ScanResult:
-    result = scan_library(db)
+def scan_videos(
+    force_metadata: bool = False,
+    db: Session = Depends(get_db),
+) -> ScanResult:
+    """Scan all enabled libraries.
+
+    `force_metadata=true` re-runs ffprobe on every existing row even if its
+    file mtime/size haven't changed. Use this after a metadata-extraction
+    bug fix to refresh stale stored values.
+    """
+    result = scan_library(db, force_metadata=force_metadata)
     return ScanResult(**result)
 
 

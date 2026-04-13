@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     ffprobe_binary: str = "ffprobe"
     ffmpeg_binary: str = "ffmpeg"
     big_archive_dir: Path = Field(default=Path(r"L:\Prvt\big"))
+    # Encoder selection: "auto" (use NVENC if available), "cpu" (force libx264), "nvenc" (force h264_nvenc)
+    encoder_mode: str = "auto"
 
     @property
     def library_dirs(self) -> list[Path]:
@@ -66,6 +68,10 @@ class Settings(BaseSettings):
         return self.media_dir / "hls"
 
     @property
+    def converted_dir(self) -> Path:
+        return self.media_dir / "converted"
+
+    @property
     def database_url(self) -> str:
         return f"sqlite:///{self.database_path.as_posix()}"
 
@@ -73,7 +79,7 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
-    for directory in (settings.data_dir, settings.media_dir, settings.hls_dir):
+    for directory in (settings.data_dir, settings.media_dir, settings.hls_dir, settings.converted_dir):
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError:

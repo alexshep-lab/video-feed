@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
+from .encoder import build_bitrate_video_args, get_effective_encoder
 
 logger = logging.getLogger("videofeed.transcoder")
 
@@ -135,16 +136,12 @@ async def _transcode_video(video_id: str) -> None:
         # Scale filter: preserve aspect ratio, ensure even dimensions
         scale = f"scale=-2:{height}" if src_height > 0 else f"scale=-2:{height}"
 
+        encoder_args = build_bitrate_video_args(video_bitrate=vbr, preset="medium")
         cmd = [
             settings.ffmpeg_binary,
             "-i", str(src_path),
             "-vf", scale,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "23",
-            "-b:v", vbr,
-            "-maxrate", vbr,
-            "-bufsize", str(int(vbr.replace("k", "")) * 2) + "k",
+            *encoder_args,
             "-c:a", "aac",
             "-b:a", abr,
             "-ac", "2",
@@ -155,7 +152,7 @@ async def _transcode_video(video_id: str) -> None:
             str(out_dir / "stream.m3u8"),
         ]
 
-        logger.info("Transcoding %s @ %s: %s", video_id, name, " ".join(cmd))
+        logger.info("Transcoding %s @ %s using encoder=%s", video_id, name, get_effective_encoder())
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,

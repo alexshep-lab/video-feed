@@ -39,6 +39,7 @@ export default function HomePage() {
   const [tileSize, setTileSize] = useState(260);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
+  const [readyOnly, setReadyOnly] = useState(false);
 
   // Filters state
   const [q, setQ] = useState("");
@@ -71,7 +72,7 @@ export default function HomePage() {
     setPage(0);
     setVideos([]);
     setHasMore(true);
-  }, [q, sort, tag, codec, library, mode, reviewFilter]);
+  }, [q, sort, tag, codec, library, mode, reviewFilter, readyOnly]);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,6 +89,7 @@ export default function HomePage() {
     if (mode === "unconfirmed") {
       if (reviewFilter === "unconfirmed") params.confirmed = false;
       if (reviewFilter === "confirmed") params.confirmed = true;
+      if (readyOnly) params.ready = true;
     }
 
     fetchVideos(params)
@@ -111,7 +113,7 @@ export default function HomePage() {
       });
 
     return () => { cancelled = true; };
-  }, [q, sort, tag, codec, library, mode, reviewFilter, page]);
+  }, [q, sort, tag, codec, library, mode, reviewFilter, readyOnly, page]);
 
   useEffect(() => {
     if (mode !== "library") return;
@@ -374,19 +376,43 @@ export default function HomePage() {
 
         {!loading && mode === "unconfirmed" && (
           <div className="space-y-4">
-            <div className="flex flex-wrap gap-2">
-              <button className={tabCls(reviewFilter === "all")} onClick={() => setReviewFilter("all")}>All</button>
-              <button className={tabCls(reviewFilter === "unconfirmed")} onClick={() => setReviewFilter("unconfirmed")}>Unconfirmed</button>
-              <button className={tabCls(reviewFilter === "confirmed")} onClick={() => setReviewFilter("confirmed")}>Confirmed</button>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap gap-2">
+                <button className={tabCls(reviewFilter === "all")} onClick={() => setReviewFilter("all")}>All</button>
+                <button className={tabCls(reviewFilter === "unconfirmed")} onClick={() => setReviewFilter("unconfirmed")}>Unconfirmed</button>
+                <button className={tabCls(reviewFilter === "confirmed")} onClick={() => setReviewFilter("confirmed")}>Confirmed</button>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-white/70 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={readyOnly}
+                  onChange={(e) => setReadyOnly(e.target.checked)}
+                  className="h-4 w-4 accent-amber-500 cursor-pointer"
+                />
+                Ready to review (converted + palette generated)
+              </label>
             </div>
             <p className="text-sm text-white/40">Search and filters work here too. You can review both confirmed and unconfirmed videos from one place.</p>
             <div
               className="grid gap-4"
               style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${tileSize}px, 1fr))` }}
             >
-              {videos.map((v) => (
+              {videos.map((v) => {
+                // Propagate the active review filter to the watch page so it can
+                // auto-advance to the next matching video after Confirm / Hard Delete.
+                const reviewParams = new URLSearchParams({ review: "1" });
+                if (reviewFilter === "unconfirmed") reviewParams.set("confirmed", "false");
+                if (reviewFilter === "confirmed") reviewParams.set("confirmed", "true");
+                if (readyOnly) reviewParams.set("ready", "true");
+                if (q) reviewParams.set("q", q);
+                if (tag) reviewParams.set("tag", tag);
+                if (codec) reviewParams.set("codec", codec);
+                if (library) reviewParams.set("library", library);
+                if (sort && sort !== "shuffle") reviewParams.set("sort", sort);
+                const linkQuery = reviewParams.toString();
+                return (
                 <div key={v.id} className="relative">
-                  <VideoCard video={v} showPath showExtraMeta />
+                  <VideoCard video={v} showPath showExtraMeta linkQuery={linkQuery} />
                   <button
                     onClick={() => confirmVideo(v.id)}
                     className={`mt-1 w-full rounded-lg px-3 py-1 text-xs transition ${
@@ -398,7 +424,8 @@ export default function HomePage() {
                     ✓ Confirm
                   </button>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

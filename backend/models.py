@@ -83,6 +83,10 @@ class Video(Base):
     compress_progress: Mapped[float] = mapped_column(Float, default=0.0)
     compressed_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     compressed_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Browser-friendly conversion (e.g. WMV -> MP4). Original file is kept until validated.
+    convert_status: Mapped[str] = mapped_column(String(32), default="none", index=True)  # none|pending|processing|completed|failed|skipped
+    convert_progress: Mapped[float] = mapped_column(Float, default=0.0)
+    converted_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 

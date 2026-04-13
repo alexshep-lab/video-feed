@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import LibraryFolder, Tag, Video
+from .converter import enqueue_convert, needs_conversion, start_convert_worker
 from .metadata import extract_video_metadata, is_supported_video_file
 from .thumbnail import generate_thumbnail
 
@@ -139,6 +140,10 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
     # Tag cache
     tag_cache: dict[str, Tag] = {}
 
+    # IDs of videos that need browser-friendly conversion (e.g. WMV).
+    # Enqueued at the end of the scan, after final commit, to avoid races.
+    pending_conversion_ids: list[str] = []
+
     for path, library_dir in all_files:
         scanned_files += 1
         resolved = str(path.resolve())
@@ -210,6 +215,8 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
 
         if existing is None:
             video = Video(**payload)
+            if needs_conversion(path):
+                video.convert_status = "pending"
             session.add(video)
             session.flush()
             try:
@@ -220,9 +227,29 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
             existing_by_path[resolved] = video
             _apply_folder_tags(session, video, path, library_dir, tag_cache, library_dirs)
             created += 1
+            if needs_conversion(path):
+                pending_conversion_ids.append(video.id)
         else:
+            # Source content changed (size/mtime differ) → cached conversion is stale.
+            # Drop the old converted file and let the worker regenerate it if still needed.
+            if needs_metadata and existing.converted_path:
+                try:
+                    Path(existing.converted_path).unlink()
+                except (OSError, FileNotFoundError):
+                    pass
+                existing.converted_path = None
+                existing.convert_status = "none"
+                existing.convert_progress = 0.0
+
             for key, value in payload.items():
                 setattr(existing, key, value)
+
+            # Re-queue conversion if the (now-updated) file still needs it.
+            if needs_metadata and needs_conversion(path) and existing.convert_status in ("none", "failed"):
+                existing.convert_status = "pending"
+                existing.convert_progress = 0.0
+                pending_conversion_ids.append(existing.id)
+
             if needs_metadata or not existing.thumbnail_path:
                 try:
                     thumbnail = generate_thumbnail(path, existing.id, payload["duration"])
@@ -264,6 +291,22 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
 
     # Final commit
     session.commit()
+
+    # Enqueue browser-friendly conversion for any new WMV/etc files we found.
+    # Worker is started by the FastAPI lifespan; here we just push IDs.
+    for video_id in pending_conversion_ids:
+        try:
+            enqueue_convert(video_id)
+        except Exception:
+            pass
+    if pending_conversion_ids:
+        try:
+            start_convert_worker()
+        except RuntimeError:
+            # No running event loop in this context; the worker started by
+            # the lifespan will pick up the queued items on its own.
+            pass
+
     _update_progress(running=False, phase="done", processed=scanned_files)
 
     return {

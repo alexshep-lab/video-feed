@@ -28,6 +28,26 @@ def guess_media_type(file_path: Path) -> str:
     return media_type or "application/octet-stream"
 
 
+def effective_source_path(video: Video) -> Path | None:
+    """Resolve which file should be used for anything derived from the video.
+
+    Prefers the browser-friendly converted MP4 when available — this matters
+    not just for playback but also for thumbnails, contact sheets and preview
+    frames. Without this, ffmpeg would re-decode the original WMV (slow on
+    CPU because NVDEC on Turing doesn't support WMV3/VC-1/MPEG-4 ASP), which
+    the user perceives as "transcoding still happening" after conversion.
+    """
+    if video.convert_status == "completed" and video.converted_path:
+        converted = Path(video.converted_path)
+        if converted.exists():
+            return converted
+    if video.original_path:
+        original = Path(video.original_path)
+        if original.exists():
+            return original
+    return None
+
+
 @router.get("/{video_id}/hls/{path:path}", name="stream_hls")
 def stream_hls(video_id: str, path: str, db: Session = Depends(get_db)):
     """Serve HLS master playlist, variant playlists, and .ts segments."""
@@ -57,12 +77,12 @@ def stream_raw_video(
         logger.warning("stream_raw: video not found id=%s", video_id)
         raise HTTPException(status_code=404, detail="Video not found")
 
-    file_path = Path(video.original_path)
-    logger.info("stream_raw: id=%s path=%s exists=%s", video_id, file_path, file_path.exists())
-
-    if not file_path.exists():
-        logger.error("stream_raw: FILE MISSING id=%s path=%s", video_id, file_path)
+    file_path = effective_source_path(video)
+    if file_path is None:
+        logger.error("stream_raw: FILE MISSING id=%s original=%s converted=%s",
+                     video_id, video.original_path, video.converted_path)
         raise HTTPException(status_code=404, detail="Video file is missing")
+    logger.info("stream_raw: id=%s path=%s", video_id, file_path)
 
     file_size = file_path.stat().st_size
     range_header = request.headers.get("range")
@@ -98,9 +118,9 @@ def stream_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    file_path = Path(video.original_path)
-    if not file_path.exists():
-        logger.warning("thumbnail: source file missing id=%s path=%s", video_id, file_path)
+    file_path = effective_source_path(video)
+    if file_path is None:
+        logger.warning("thumbnail: source file missing id=%s", video_id)
         return Response(content=fallback_svg_bytes(video.title), media_type="image/svg+xml")
 
     try:
@@ -115,9 +135,9 @@ def stream_contact_sheet(video_id: str, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
-    file_path = Path(video.original_path)
-    if not file_path.exists():
-        logger.warning("contact-sheet: source file missing id=%s path=%s", video_id, file_path)
+    file_path = effective_source_path(video)
+    if file_path is None:
+        logger.warning("contact-sheet: source file missing id=%s", video_id)
         return Response(content=fallback_svg_bytes(video.title), media_type="image/svg+xml")
     try:
         sheet = generate_contact_sheet(file_path, video.id, video.duration)
@@ -136,9 +156,9 @@ def stream_video_preview_frame(
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    file_path = Path(video.original_path)
-    if not file_path.exists():
-        logger.warning("preview-frame: source file missing id=%s path=%s", video_id, file_path)
+    file_path = effective_source_path(video)
+    if file_path is None:
+        logger.warning("preview-frame: source file missing id=%s", video_id)
         return Response(content=fallback_svg_bytes(f"{video.title}-{frame_index}"), media_type="image/svg+xml")
 
     try:

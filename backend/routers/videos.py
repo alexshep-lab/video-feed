@@ -15,9 +15,34 @@ from ..schemas import (
     VideoListItem,
     VideoUpdate,
 )
+from ..services.converter import NEEDS_CONVERSION_EXTENSIONS
+from ..services.palette import palette_exists
 
 
 router = APIRouter(prefix="/videos", tags=["videos"])
+
+
+def _apply_ready_sql(statement):
+    """Restrict to videos whose source is (or will be) playable in a browser.
+
+    SQL-level check — catches the common "needs conversion and conversion is
+    done" case. The per-video palette-existence check is layered on top in
+    Python because it's a filesystem lookup.
+    """
+    from sqlalchemy import or_, and_, not_
+    ext_clauses = [Video.original_path.ilike(f"%{ext}") for ext in NEEDS_CONVERSION_EXTENSIONS]
+    needs_conv = or_(*ext_clauses)
+    # A row is playable if:
+    #   - the original doesn't need conversion (native mp4/webm/mkv/mov/etc.), OR
+    #   - conversion finished successfully
+    return statement.where(
+        or_(not_(needs_conv), Video.convert_status == "completed")
+    )
+
+
+def _video_is_review_ready(video: Video) -> bool:
+    """Second-stage Python filter for ``ready=true``: palette file on disk."""
+    return palette_exists(video.id)
 
 
 # ---- List / Search / Filter ----
@@ -35,6 +60,7 @@ def list_videos(
     is_vertical: bool | None = Query(default=None),
     favorite: bool | None = Query(default=None),
     confirmed: bool | None = Query(default=None),
+    ready: bool | None = Query(default=None),
     show_deleted: bool = Query(default=False),
     sort: str = Query(default="shuffle"),
     offset: int = Query(default=0, ge=0),
@@ -88,8 +114,19 @@ def list_videos(
         statement = statement.where(Video.confirmed == confirmed)
     if not show_deleted:
         statement = statement.where(Video.deleted_at.is_(None))
+    if ready:
+        statement = _apply_ready_sql(statement)
 
-    videos = db.scalars(statement.offset(offset).limit(limit)).all()
+    if not ready:
+        videos = db.scalars(statement.offset(offset).limit(limit)).all()
+    else:
+        # When ready=true we need to additionally check palette existence on
+        # disk. Fetch a window larger than `limit`, filter, then slice. This
+        # keeps the DB query simple at the cost of possibly over-fetching.
+        FETCH_MULTIPLIER = 4
+        fetch_limit = limit * FETCH_MULTIPLIER
+        all_rows = db.scalars(statement.offset(offset).limit(fetch_limit)).all()
+        videos = [v for v in all_rows if _video_is_review_ready(v)][:limit]
     return [to_list_item(request, video) for video in videos]
 
 
@@ -124,6 +161,96 @@ def count_videos(
 
     total = db.scalar(statement) or 0
     return {"total": total}
+
+
+# ---- Next in sequence (for review auto-advance) ----
+
+@router.get("/next")
+def next_video(
+    request: Request,
+    after: str | None = Query(default=None, description="ID of the current video — returned next will come after it"),
+    q: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    library: str | None = Query(default=None),
+    codec: str | None = Query(default=None),
+    duration_min: float | None = Query(default=None),
+    duration_max: float | None = Query(default=None),
+    is_vertical: bool | None = Query(default=None),
+    favorite: bool | None = Query(default=None),
+    confirmed: bool | None = Query(default=None),
+    ready: bool | None = Query(default=None),
+    sort: str = Query(default="newest"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return the ID of the next video matching the same filters as ``GET /videos``.
+
+    Used by the review-mode auto-advance on the watch page: after confirming
+    or hard-deleting a video, the frontend calls this to figure out what to
+    navigate to next. ``sort=shuffle`` is intentionally not exposed here —
+    for a deterministic "next" you want a stable ordering.
+    """
+    # Build the same query we use for listing, without a pre-filter on `after`.
+    ordering = {
+        "newest": desc(Video.added_at),
+        "oldest": Video.added_at,
+        "title": Video.title,
+        "duration": Video.duration,
+        "size": desc(Video.file_size),
+        "most_viewed": desc(Video.view_count),
+        "last_watched": desc(Video.last_watched_at),
+    }
+    order_by = ordering.get(sort, desc(Video.added_at))
+
+    statement: Select[tuple[Video]] = select(Video).order_by(order_by)
+
+    enabled_folders = db.scalars(
+        select(LibraryFolder).where(LibraryFolder.enabled == True)  # noqa: E712
+    ).all()
+    if enabled_folders:
+        enabled_paths = [f.path for f in enabled_folders]
+        statement = statement.where(Video.library_path.in_(enabled_paths))
+
+    if q:
+        pattern = f"%{q.strip()}%"
+        statement = statement.where(
+            or_(Video.title.ilike(pattern), Video.original_filename.ilike(pattern))
+        )
+    if tag:
+        statement = statement.join(video_tags).join(Tag).where(Tag.name == tag)
+    if category:
+        statement = statement.where(Video.category == category)
+    if library:
+        statement = statement.where(Video.library_path == library)
+    if codec:
+        statement = statement.where(Video.codec == codec)
+    if duration_min is not None:
+        statement = statement.where(Video.duration >= duration_min)
+    if duration_max is not None:
+        statement = statement.where(Video.duration <= duration_max)
+    if is_vertical is not None:
+        statement = statement.where(Video.is_vertical == is_vertical)
+    if favorite is not None:
+        statement = statement.where(Video.favorite == favorite)
+    if confirmed is not None:
+        statement = statement.where(Video.confirmed == confirmed)
+    statement = statement.where(Video.deleted_at.is_(None))
+    if ready:
+        statement = _apply_ready_sql(statement)
+
+    # Iterate through the query results, skip until we pass `after`, apply the
+    # ready-palette check on the Python side, and return the first matching id.
+    found_after = after is None
+    # Limit cap to avoid loading everything for huge libraries
+    for video in db.scalars(statement.limit(5000)):
+        if not found_after:
+            if video.id == after:
+                found_after = True
+            continue
+        if ready and not _video_is_review_ready(video):
+            continue
+        return {"next_id": video.id, "next": to_list_item(request, video).model_dump()}
+    return {"next_id": None, "next": None}
 
 
 # ---- Filters metadata ----
@@ -508,6 +635,8 @@ def to_detail_item(request: Request, video: Video) -> VideoDetail:
         compress_status=video.compress_status or "none",
         compress_progress=video.compress_progress or 0.0,
         compressed_size=video.compressed_size,
+        convert_status=video.convert_status or "none",
+        convert_progress=video.convert_progress or 0.0,
         added_at=video.added_at,
         original_path=video.original_path,
         raw_stream_url=str(request.url_for("stream_raw_video", video_id=video.id)),
