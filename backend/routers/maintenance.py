@@ -1,7 +1,8 @@
 """Maintenance endpoints: duplicates, compression, contact sheets, etc."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -291,6 +292,32 @@ def palette_missing_count(db: Session = Depends(get_db)) -> dict:
     return {"missing": count_videos_without_palette(db)}
 
 
+@router.get("/palettes/failures")
+def palette_failures(db: Session = Depends(get_db), limit: int = 500) -> dict:
+    """Videos whose last palette-generation attempt raised. Cleared on success."""
+    from ..models import Video
+    rows = db.scalars(
+        select(Video)
+        .where(Video.palette_error.is_not(None), Video.deleted_at.is_(None))
+        .order_by(Video.palette_failed_at.desc().nullslast())
+        .limit(max(1, min(limit, 5000)))
+    ).all()
+    return {
+        "total": len(rows),
+        "items": [
+            {
+                "id": v.id,
+                "title": v.title,
+                "original_filename": v.original_filename,
+                "original_path": v.original_path,
+                "failed_at": v.palette_failed_at.isoformat() if v.palette_failed_at else None,
+                "error": v.palette_error,
+            }
+            for v in rows
+        ],
+    }
+
+
 @router.get("/palettes/candidates")
 def palette_candidates(
     request: Request,
@@ -445,6 +472,169 @@ def retry_orphans_all(db: Session = Depends(get_db)) -> dict:
             still_locked += 1
     db.commit()
     return {"recycled": recycled, "still_locked": still_locked, "purged_no_file": purged_no_file}
+
+
+# ---- Missing-file cleanup (DB row exists, source file gone) ----
+
+@router.get("/missing-files")
+def list_missing_files(request: Request, db: Session = Depends(get_db)) -> dict:
+    """Non-deleted videos whose original_path no longer exists on disk.
+
+    Happens when files are moved/deleted outside the app. The records are
+    useless — playback, palette generation, conversion all fail.
+    """
+    import os
+    from ..models import Video as _V
+    rows = db.scalars(select(_V).where(_V.deleted_at.is_(None))).all()
+    items = []
+    for v in rows:
+        try:
+            exists = bool(v.original_path) and os.path.exists(v.original_path)
+        except Exception:
+            exists = False
+        if exists:
+            continue
+        items.append({
+            "id": v.id,
+            "title": v.title,
+            "original_filename": v.original_filename,
+            "original_path": v.original_path,
+        })
+    return {"count": len(items), "items": items}
+
+
+@router.post("/missing-files/purge")
+def purge_missing_files(db: Session = Depends(get_db)) -> dict:
+    """Hard-delete DB rows whose source file is gone. Also drops derived assets."""
+    import os
+    from ..models import Video as _V, WatchEvent, WatchProgress
+    from ..services.thumbnail import invalidate_video_cache
+
+    rows = db.scalars(select(_V).where(_V.deleted_at.is_(None))).all()
+    purged = 0
+    for v in rows:
+        try:
+            exists = bool(v.original_path) and os.path.exists(v.original_path)
+        except Exception:
+            exists = False
+        if exists:
+            continue
+        try:
+            invalidate_video_cache(v.id)
+        except Exception:
+            pass
+        db.query(WatchEvent).filter(WatchEvent.video_id == v.id).delete(synchronize_session=False)
+        db.query(WatchProgress).filter(WatchProgress.video_id == v.id).delete(synchronize_session=False)
+        db.delete(v)
+        purged += 1
+    db.commit()
+    return {"purged": purged}
+
+
+# ---- Short-video cleanup (duration <= threshold, move to Recycle Bin) ----
+
+@router.get("/short-videos")
+def list_short_videos(
+    max_seconds: float = Query(default=420.0, ge=1.0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Preview of active videos whose duration is <= max_seconds (default 7 min).
+
+    NULL durations are skipped — we only touch rows where duration is known.
+    """
+    from ..models import Video as _V
+    rows = db.scalars(
+        select(_V).where(
+            _V.deleted_at.is_(None),
+            _V.duration.is_not(None),
+            _V.duration <= max_seconds,
+        )
+    ).all()
+    items = [
+        {
+            "id": v.id,
+            "title": v.title,
+            "original_filename": v.original_filename,
+            "original_path": v.original_path,
+            "duration": v.duration,
+            "file_size": v.file_size,
+        }
+        for v in rows
+    ]
+    return {"count": len(items), "max_seconds": max_seconds, "items": items}
+
+
+@router.post("/short-videos/purge")
+def purge_short_videos(
+    max_seconds: float = Query(default=420.0, ge=1.0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Move files with duration <= max_seconds to Recycle Bin and hard-delete rows.
+
+    NULL durations are skipped. Files that can't be moved (locked, permission)
+    leave the DB row untouched so a retry can pick them up.
+    """
+    import os
+    from pathlib import Path as _P
+    from ..models import Video as _V, WatchEvent, WatchProgress
+    from ..services.fileops import move_to_recycle_bin
+    from ..services.thumbnail import invalidate_video_cache
+
+    rows = db.scalars(
+        select(_V).where(
+            _V.deleted_at.is_(None),
+            _V.duration.is_not(None),
+            _V.duration <= max_seconds,
+        )
+    ).all()
+
+    recycled = 0
+    still_locked = 0
+    purged_no_file = 0
+    errors: list[dict] = []
+
+    for v in rows:
+        path_str = v.original_path or ""
+        try:
+            exists = bool(path_str) and os.path.exists(path_str)
+        except Exception:
+            exists = False
+
+        if not exists:
+            try:
+                invalidate_video_cache(v.id)
+            except Exception:
+                pass
+            db.query(WatchEvent).filter(WatchEvent.video_id == v.id).delete(synchronize_session=False)
+            db.query(WatchProgress).filter(WatchProgress.video_id == v.id).delete(synchronize_session=False)
+            db.delete(v)
+            purged_no_file += 1
+            continue
+
+        try:
+            move_to_recycle_bin(_P(path_str))
+        except Exception as e:
+            still_locked += 1
+            errors.append({"id": v.id, "path": path_str, "error": str(e)})
+            continue
+
+        try:
+            invalidate_video_cache(v.id)
+        except Exception:
+            pass
+        db.query(WatchEvent).filter(WatchEvent.video_id == v.id).delete(synchronize_session=False)
+        db.query(WatchProgress).filter(WatchProgress.video_id == v.id).delete(synchronize_session=False)
+        db.delete(v)
+        recycled += 1
+
+    db.commit()
+    return {
+        "recycled": recycled,
+        "still_locked": still_locked,
+        "purged_no_file": purged_no_file,
+        "max_seconds": max_seconds,
+        "errors": errors[:20],
+    }
 
 
 # ---- Encoder info ----

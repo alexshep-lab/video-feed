@@ -22,7 +22,14 @@ export default function StatsPage() {
   if (error) return <p className="text-red-300">{error}</p>;
   if (!stats) return <p className="text-white/60">Loading...</p>;
 
-  const { overview, most_viewed, recent_history, popular_tags, daily_activity } = stats;
+  const { overview, most_viewed, recent_history, popular_tags, daily_activity, pipeline } = stats;
+  const confirmedPct = pipeline.total_active > 0
+    ? Math.round((pipeline.confirmed / pipeline.total_active) * 100)
+    : 0;
+  const palettePct = pipeline.total_active > 0
+    ? Math.round((pipeline.with_palette / pipeline.total_active) * 100)
+    : 0;
+  const convertNeedsWork = pipeline.convert.pending + pipeline.convert.processing + pipeline.convert.failed;
 
   const maxViews = Math.max(...daily_activity.map((d) => d.views), 1);
 
@@ -38,6 +45,86 @@ export default function StatsPage() {
         <StatCard label="Favorites" value={String(overview.total_favorites)} />
         <StatCard label="Total Views" value={String(overview.total_views)} />
         <StatCard label="Watch Time" value={formatDuration(overview.total_watch_time_seconds)} />
+      </div>
+
+      {/* Collection pipeline */}
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-5 space-y-4">
+        <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wider">Collection Pipeline</h2>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <StatCard label="Active" value={String(pipeline.total_active)} />
+          <StatCard label="Unconfirmed" value={String(pipeline.unconfirmed)} />
+          <StatCard label="Ready to review" value={String(pipeline.ready_to_review)} />
+          <StatCard label="Soft-deleted" value={String(pipeline.soft_deleted)} />
+        </div>
+
+        {/* Confirmed progress */}
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs text-white/60">
+            <span>Confirmed</span>
+            <span>{pipeline.confirmed} / {pipeline.total_active} ({confirmedPct}%)</span>
+          </div>
+          <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+            <div className="h-full bg-green-500/70" style={{ width: `${confirmedPct}%` }} />
+          </div>
+        </div>
+
+        {/* Palette progress */}
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs text-white/60">
+            <span>Palettes generated</span>
+            <span>
+              {pipeline.with_palette} / {pipeline.total_active} ({palettePct}%)
+              {pipeline.palette_failed > 0 && (
+                <span className="text-red-300"> - failed: {pipeline.palette_failed}</span>
+              )}
+            </span>
+          </div>
+          <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+            <div className="h-full bg-accent/70" style={{ width: `${palettePct}%` }} />
+          </div>
+          {pipeline.missing_palette > 0 && (
+            <p className="text-xs text-white/40">Missing palette: {pipeline.missing_palette}</p>
+          )}
+        </div>
+
+        {/* Conversion */}
+        <div className="space-y-2">
+          <div className="flex justify-between text-xs text-white/60">
+            <span>Browser conversion (WMV/AVI → MP4)</span>
+            <span>
+              {convertNeedsWork > 0
+                ? <span className="text-amber-300">{convertNeedsWork} need work</span>
+                : <span className="text-white/40">all done</span>}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 text-xs">
+            <div className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="text-white/40">Pending</div>
+              <div className="text-white font-medium">{pipeline.convert.pending}</div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="text-white/40">Processing</div>
+              <div className="text-white font-medium">{pipeline.convert.processing}</div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="text-white/40">Completed</div>
+              <div className="text-white font-medium">{pipeline.convert.completed}</div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="text-white/40">Failed</div>
+              <div className={`font-medium ${pipeline.convert.failed > 0 ? "text-red-300" : "text-white"}`}>{pipeline.convert.failed}</div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="text-white/40">Skipped</div>
+              <div className="text-white font-medium">{pipeline.convert.skipped}</div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="text-white/40">N/A</div>
+              <div className="text-white font-medium">{pipeline.convert.none}</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Activity chart */}

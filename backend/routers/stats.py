@@ -13,6 +13,82 @@ from ..models import Tag, Video, WatchEvent, video_tags
 router = APIRouter(prefix="/stats", tags=["stats"])
 
 
+def _pipeline_stats(db: Session) -> dict:
+    """Collection-pipeline status: how many videos are at each stage.
+
+    Mirrors what the user sees in the maintenance page, aggregated into the
+    stats overview so they can track progress on preparing the library.
+    """
+    from ..services.palette import list_existing_palette_ids
+
+    active = select(Video.id).where(Video.deleted_at.is_(None)).subquery()
+    total_active = db.scalar(select(func.count()).select_from(active)) or 0
+
+    confirmed = db.scalar(
+        select(func.count(Video.id)).where(Video.deleted_at.is_(None), Video.confirmed == True)  # noqa: E712
+    ) or 0
+    unconfirmed = total_active - confirmed
+
+    convert_counts = dict(
+        db.execute(
+            select(Video.convert_status, func.count(Video.id))
+            .where(Video.deleted_at.is_(None))
+            .group_by(Video.convert_status)
+        ).all()
+    )
+
+    palette_ids = list_existing_palette_ids()
+    with_palette = db.scalar(
+        select(func.count(Video.id)).where(
+            Video.deleted_at.is_(None), Video.id.in_(palette_ids)
+        )
+    ) or 0 if palette_ids else 0
+    missing_palette = total_active - with_palette
+
+    palette_failed = db.scalar(
+        select(func.count(Video.id)).where(
+            Video.deleted_at.is_(None), Video.palette_error.is_not(None)
+        )
+    ) or 0
+
+    # Rows whose source file is gone (from the soft-deleted exclusion above,
+    # so we sample; exact figure requires an O(N) stat loop, which the
+    # maintenance page already exposes on demand).
+    soft_deleted = db.scalar(
+        select(func.count(Video.id)).where(Video.deleted_at.is_not(None))
+    ) or 0
+
+    ready_to_review = 0
+    if palette_ids:
+        ready_to_review = db.scalar(
+            select(func.count(Video.id)).where(
+                Video.deleted_at.is_(None),
+                Video.confirmed == False,  # noqa: E712
+                Video.convert_status.in_(("none", "completed", "skipped")),
+                Video.id.in_(palette_ids),
+            )
+        ) or 0
+
+    return {
+        "total_active": total_active,
+        "confirmed": confirmed,
+        "unconfirmed": unconfirmed,
+        "ready_to_review": ready_to_review,
+        "with_palette": with_palette,
+        "missing_palette": missing_palette,
+        "palette_failed": palette_failed,
+        "convert": {
+            "pending": convert_counts.get("pending", 0),
+            "processing": convert_counts.get("processing", 0),
+            "completed": convert_counts.get("completed", 0),
+            "failed": convert_counts.get("failed", 0),
+            "skipped": convert_counts.get("skipped", 0),
+            "none": convert_counts.get("none", 0),
+        },
+        "soft_deleted": soft_deleted,
+    }
+
+
 @router.get("")
 def get_stats(db: Session = Depends(get_db)) -> dict:
     """Aggregated statistics for the stats page."""
@@ -115,6 +191,7 @@ def get_stats(db: Session = Depends(get_db)) -> dict:
             {"date": str(r[0]), "views": r[1], "watch_time": r[2] or 0}
             for r in daily_activity
         ],
+        "pipeline": _pipeline_stats(db),
     }
 
 

@@ -87,6 +87,9 @@ class Video(Base):
     convert_status: Mapped[str] = mapped_column(String(32), default="none", index=True)  # none|pending|processing|completed|failed|skipped
     convert_progress: Mapped[float] = mapped_column(Float, default=0.0)
     converted_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    # Palette (contact sheet) generation error — set on failure, cleared on success.
+    palette_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    palette_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 

@@ -152,7 +152,12 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
     for path, library_dir in all_files:
         scanned_files += 1
         resolved = str(path.resolve())
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except (FileNotFoundError, OSError):
+            # File vanished between directory listing and stat (moved, deleted,
+            # network share hiccup). Skip — next scan will pick it up if it returns.
+            continue
         current_size = stat.st_size
         current_mtime = stat.st_mtime
 

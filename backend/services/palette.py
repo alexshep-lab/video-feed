@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -50,6 +51,22 @@ def _contact_sheet_path(video_id: str) -> Path:
 def palette_exists(video_id: str) -> bool:
     path = _contact_sheet_path(video_id)
     return path.exists() and path.stat().st_size > 0
+
+
+def list_existing_palette_ids() -> set[str]:
+    """Return every video_id that has a non-empty contact-sheet file on disk.
+
+    One directory scan beats O(N) per-file stat() calls when filtering a large
+    list of videos by palette availability.
+    """
+    sheets_dir = get_settings().media_dir / "contact_sheets"
+    if not sheets_dir.exists():
+        return set()
+    ids: set[str] = set()
+    for entry in sheets_dir.iterdir():
+        if entry.suffix.lower() == ".jpg" and entry.is_file() and entry.stat().st_size > 0:
+            ids.add(entry.stem)
+    return ids
 
 
 def _effective_source(video: Video) -> Path | None:
@@ -259,6 +276,32 @@ def stop_palette_all() -> dict:
     return {"dropped_queued": dropped, "interrupted_video_id": _current_video_id, "killed_procs": killed}
 
 
+def _mark_palette_failure(video_id: str, error: str) -> None:
+    try:
+        with SessionLocal() as session:
+            video = session.get(Video, video_id)
+            if not video:
+                return
+            video.palette_error = error[:2000]
+            video.palette_failed_at = datetime.now(timezone.utc)
+            session.commit()
+    except Exception:
+        logger.exception("Could not persist palette failure for %s", video_id)
+
+
+def _mark_palette_success(video_id: str) -> None:
+    try:
+        with SessionLocal() as session:
+            video = session.get(Video, video_id)
+            if not video or video.palette_error is None:
+                return
+            video.palette_error = None
+            video.palette_failed_at = None
+            session.commit()
+    except Exception:
+        pass
+
+
 async def _worker_loop() -> None:
     global _current_video_id, _batch_completed_jobs, _batch_failed_jobs
     logger.info("Palette worker started")
@@ -274,9 +317,11 @@ async def _worker_loop() -> None:
         try:
             await asyncio.to_thread(_generate_one, video_id)
             _batch_completed_jobs += 1
-        except Exception:
+            await asyncio.to_thread(_mark_palette_success, video_id)
+        except Exception as exc:
             logger.exception("Palette generation failed for %s", video_id)
             _batch_failed_jobs += 1
+            await asyncio.to_thread(_mark_palette_failure, video_id, str(exc))
         finally:
             _current_video_id = None
             _queue.task_done()

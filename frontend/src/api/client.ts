@@ -450,6 +450,25 @@ export type StatHistoryEntry = { video_id: string; watched_at: string | null; wa
 export type StatTagEntry = { name: string; total_views: number; video_count: number };
 export type StatDayEntry = { date: string; views: number; watch_time: number };
 
+export type PipelineStats = {
+  total_active: number;
+  confirmed: number;
+  unconfirmed: number;
+  ready_to_review: number;
+  with_palette: number;
+  missing_palette: number;
+  palette_failed: number;
+  convert: {
+    pending: number;
+    processing: number;
+    completed: number;
+    failed: number;
+    skipped: number;
+    none: number;
+  };
+  soft_deleted: number;
+};
+
 export type StatsResponse = {
   overview: StatsOverview;
   most_viewed: StatVideoEntry[];
@@ -458,6 +477,7 @@ export type StatsResponse = {
   popular_tags: StatTagEntry[];
   favorites: StatVideoEntry[];
   daily_activity: StatDayEntry[];
+  pipeline: PipelineStats;
 };
 
 export async function fetchStats(): Promise<StatsResponse> {

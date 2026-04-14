@@ -407,7 +407,7 @@ export default function HomePage() {
                 if (tag) reviewParams.set("tag", tag);
                 if (codec) reviewParams.set("codec", codec);
                 if (library) reviewParams.set("library", library);
-                if (sort && sort !== "shuffle") reviewParams.set("sort", sort);
+                if (sort) reviewParams.set("sort", sort);
                 const linkQuery = reviewParams.toString();
                 return (
                 <div key={v.id} className="relative">

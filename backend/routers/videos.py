@@ -16,7 +16,7 @@ from ..schemas import (
     VideoUpdate,
 )
 from ..services.converter import NEEDS_CONVERSION_EXTENSIONS
-from ..services.palette import palette_exists
+from ..services.palette import list_existing_palette_ids, palette_exists
 
 
 router = APIRouter(prefix="/videos", tags=["videos"])
@@ -116,17 +116,12 @@ def list_videos(
         statement = statement.where(Video.deleted_at.is_(None))
     if ready:
         statement = _apply_ready_sql(statement)
+        palette_ids = list_existing_palette_ids()
+        if not palette_ids:
+            return []
+        statement = statement.where(Video.id.in_(palette_ids))
 
-    if not ready:
-        videos = db.scalars(statement.offset(offset).limit(limit)).all()
-    else:
-        # When ready=true we need to additionally check palette existence on
-        # disk. Fetch a window larger than `limit`, filter, then slice. This
-        # keeps the DB query simple at the cost of possibly over-fetching.
-        FETCH_MULTIPLIER = 4
-        fetch_limit = limit * FETCH_MULTIPLIER
-        all_rows = db.scalars(statement.offset(offset).limit(fetch_limit)).all()
-        videos = [v for v in all_rows if _video_is_review_ready(v)][:limit]
+    videos = db.scalars(statement.offset(offset).limit(limit)).all()
     return [to_list_item(request, video) for video in videos]
 
 
@@ -180,17 +175,15 @@ def next_video(
     favorite: bool | None = Query(default=None),
     confirmed: bool | None = Query(default=None),
     ready: bool | None = Query(default=None),
-    sort: str = Query(default="newest"),
+    sort: str = Query(default="shuffle"),
     db: Session = Depends(get_db),
 ) -> dict:
     """Return the ID of the next video matching the same filters as ``GET /videos``.
 
     Used by the review-mode auto-advance on the watch page: after confirming
     or hard-deleting a video, the frontend calls this to figure out what to
-    navigate to next. ``sort=shuffle`` is intentionally not exposed here —
-    for a deterministic "next" you want a stable ordering.
+    navigate to next. ``sort=shuffle`` picks any other matching video at random.
     """
-    # Build the same query we use for listing, without a pre-filter on `after`.
     ordering = {
         "newest": desc(Video.added_at),
         "oldest": Video.added_at,
@@ -200,9 +193,11 @@ def next_video(
         "most_viewed": desc(Video.view_count),
         "last_watched": desc(Video.last_watched_at),
     }
-    order_by = ordering.get(sort, desc(Video.added_at))
-
-    statement: Select[tuple[Video]] = select(Video).order_by(order_by)
+    if sort == "shuffle":
+        statement: Select[tuple[Video]] = select(Video).order_by(text("RANDOM()"))
+    else:
+        order_by = ordering.get(sort, desc(Video.added_at))
+        statement = select(Video).order_by(order_by)
 
     enabled_folders = db.scalars(
         select(LibraryFolder).where(LibraryFolder.enabled == True)  # noqa: E712
@@ -237,17 +232,22 @@ def next_video(
     statement = statement.where(Video.deleted_at.is_(None))
     if ready:
         statement = _apply_ready_sql(statement)
+        palette_ids = list_existing_palette_ids()
+        if not palette_ids:
+            return {"next_id": None, "next": None}
+        statement = statement.where(Video.id.in_(palette_ids))
 
-    # Iterate through the query results, skip until we pass `after`, apply the
-    # ready-palette check on the Python side, and return the first matching id.
-    # Iterate in two passes if needed: first try to locate `after` in the
-    # filtered set; if it's not there (e.g. user just toggled confirmed, which
-    # made it fall out of the filter), fall back to returning the first match.
+    if sort == "shuffle":
+        if after is not None:
+            statement = statement.where(Video.id != after)
+        video = db.scalars(statement.limit(1)).first()
+        if video is None:
+            return {"next_id": None, "next": None}
+        return {"next_id": video.id, "next": to_list_item(request, video).model_dump()}
+
     found_after = after is None
     first_match = None
     for video in db.scalars(statement.limit(5000)):
-        if ready and not _video_is_review_ready(video):
-            continue
         if not found_after:
             if first_match is None and video.id != after:
                 first_match = video

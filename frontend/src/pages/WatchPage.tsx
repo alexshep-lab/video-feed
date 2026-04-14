@@ -140,6 +140,50 @@ export default function WatchPage() {
     return () => { video.removeEventListener("timeupdate", onTime); clearInterval(interval); };
   }, [video, videoId]);
 
+  // Global keyboard controls — bypass the browser's default <video> handlers
+  // (those only fire when the player itself has focus, which it loses as soon
+  // as the user clicks any button on the page).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tgt = e.target as HTMLElement | null;
+      const tag = tgt?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tgt?.isContentEditable) return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const el = videoRef.current;
+      if (!el) return;
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          if (el.paused) el.play().catch(() => null); else el.pause();
+          break;
+        case "f":
+        case "F":
+          e.preventDefault();
+          if (document.fullscreenElement) document.exitFullscreen().catch(() => null);
+          else el.requestFullscreen().catch(() => null);
+          break;
+        case "ArrowLeft":
+          e.preventDefault();
+          el.currentTime = Math.max(0, el.currentTime - 5);
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          el.currentTime = Math.min(el.duration || el.currentTime + 5, el.currentTime + 5);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          el.volume = Math.min(1, el.volume + 0.1);
+          break;
+        case "ArrowDown":
+          e.preventDefault();
+          el.volume = Math.max(0, el.volume - 0.1);
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   // Auto-start transcoding for non-native formats
   useEffect(() => {
     if (!video || !videoId) return;

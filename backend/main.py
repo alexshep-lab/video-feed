@@ -7,6 +7,9 @@ from pathlib import Path
 from fastapi import FastAPI
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
+# Windows/asyncio logs ConnectionResetError when the browser aborts a video
+# Range request (seek, navigate away) — harmless, just noisy.
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +49,8 @@ def _migrate_videos_table() -> None:
         ("convert_status", "VARCHAR(32) NOT NULL DEFAULT 'none'"),
         ("convert_progress", "FLOAT NOT NULL DEFAULT 0.0"),
         ("converted_path", "VARCHAR(2048)"),
+        ("palette_error", "TEXT"),
+        ("palette_failed_at", "DATETIME"),
     ]
     with engine.begin() as connection:
         existing_cols = {

@@ -2,11 +2,38 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import subprocess
 from pathlib import Path
 
 from ..config import get_settings
 from .encoder import build_hw_decode_args
+
+
+def _ffmpeg_input_path(path: Path) -> str:
+    """Return a path string safe to pass as ffmpeg's -i argument.
+
+    FFmpeg on Windows reads argv through the ANSI codepage, so paths with
+    emoji / private-use unicode (common in downloaded filenames) arrive
+    mangled and fail with "No such file or directory". Convert to the 8.3
+    short path when available — that form is pure ASCII.
+    """
+    resolved = str(path)
+    if os.name != "nt":
+        return resolved
+    try:
+        import ctypes
+        from ctypes import wintypes
+        GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+        GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        GetShortPathNameW.restype = wintypes.DWORD
+        buf = ctypes.create_unicode_buffer(512)
+        length = GetShortPathNameW(resolved, buf, 512)
+        if 0 < length < 512 and buf.value:
+            return buf.value
+    except Exception:
+        pass
+    return resolved
 
 logger = logging.getLogger("videofeed.thumbnail")
 
@@ -117,6 +144,8 @@ def ensure_frame(video_path: Path, target: Path, timestamp: float) -> Path:
     if target.exists() and target.stat().st_size > 0:
         return target
 
+    input_path = _ffmpeg_input_path(video_path)
+
     def build(hw_args: list[str]) -> list[str]:
         # -ss before -i is "fast seek" — much cheaper than decoding from start.
         # When HW decode is enabled it must come before -ss/-i too.
@@ -126,7 +155,7 @@ def ensure_frame(video_path: Path, target: Path, timestamp: float) -> Path:
             "-loglevel", "error",
             *hw_args,
             "-ss", f"{timestamp:.3f}",
-            "-i", str(video_path),
+            "-i", input_path,
             "-frames:v", "1",
             "-q:v", "2",
             "-y",
@@ -168,6 +197,7 @@ def generate_contact_sheet(
     cols: int = 4,
     rows: int = 4,
     tile_width: int = 480,
+    tile_height: int = 270,
 ) -> Path:
     """Generate a grid of frames (16 frames at 4x4 default) via multi-seek.
 
@@ -202,17 +232,21 @@ def generate_contact_sheet(
             "-hide_banner",
             "-loglevel", "error",
         ]
+        input_path = _ffmpeg_input_path(video_path)
         for ts in timestamps:
-            cmd.extend([*hw_args, "-ss", f"{ts:.3f}", "-i", str(video_path)])
+            cmd.extend([*hw_args, "-ss", f"{ts:.3f}", "-i", input_path])
         # Scale each input to identical dims (required by tile), then stack.
         scale_chains = ";".join(
-            f"[{i}:v]scale={tile_width}:-2:force_original_aspect_ratio=decrease,"
-            f"pad={tile_width}:ih:-1:-1:color=black,setsar=1[v{i}]"
+            f"[{i}:v]trim=end_frame=1,scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+            f"pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v{i}]"
             for i in range(n)
         )
-        concat_inputs = "".join(f"[v{i}]" for i in range(n))
+        stack_inputs = "".join(f"[v{i}]" for i in range(n))
+        layout = "|".join(
+            f"{(i % cols) * tile_width}_{(i // cols) * tile_height}" for i in range(n)
+        )
         filter_complex = (
-            f"{scale_chains};{concat_inputs}concat=n={n}:v=1:a=0[cat];[cat]tile={cols}x{rows}"
+            f"{scale_chains};{stack_inputs}xstack=inputs={n}:layout={layout}"
         )
         cmd.extend([
             "-filter_complex", filter_complex,
@@ -224,8 +258,43 @@ def generate_contact_sheet(
         return cmd
 
     completed = _run_ffmpeg_with_hw_fallback(build, label=f"contact_sheet {video_id}")
-    if completed.returncode != 0 or not target.exists():
-        raise RuntimeError(completed.stderr.strip() or "ffmpeg contact sheet failed")
+    if completed.returncode == 0 and target.exists():
+        return target
+
+    # Multi-seek xstack failed (corrupted h264 NAL stream, mpeg4 oddities, etc).
+    # Fall back to a single mid-video frame upscaled to the sheet size — better
+    # a one-tile palette than nothing, and the user can still tell what the clip is.
+    logger.warning(
+        "contact_sheet %s: multi-seek failed (rc=%s), trying single-frame fallback",
+        video_id, completed.returncode,
+    )
+    sheet_w = tile_width * cols
+    sheet_h = tile_height * rows
+    midpoint = duration / 2.0
+    input_path = _ffmpeg_input_path(video_path)
+
+    def build_single(hw_args: list[str]) -> list[str]:
+        return [
+            settings.ffmpeg_binary,
+            "-hide_banner",
+            "-loglevel", "error",
+            *hw_args,
+            "-ss", f"{midpoint:.3f}",
+            "-i", input_path,
+            "-frames:v", "1",
+            "-vf",
+            f"scale={sheet_w}:{sheet_h}:force_original_aspect_ratio=decrease,"
+            f"pad={sheet_w}:{sheet_h}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "-q:v", "3",
+            "-y",
+            str(target),
+        ]
+
+    fallback = _run_ffmpeg_with_hw_fallback(build_single, label=f"contact_sheet {video_id} (fallback)")
+    if fallback.returncode != 0 or not target.exists():
+        raise RuntimeError(
+            (fallback.stderr or completed.stderr or "ffmpeg contact sheet failed").strip()
+        )
     return target
 
 

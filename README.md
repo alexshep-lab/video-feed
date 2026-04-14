@@ -153,6 +153,24 @@ Overview of total videos, size, duration, favorites, views, watch time,
 plus most-viewed / most-watched / recent history / popular tags / favorites /
 daily activity charts.
 
+**Collection Pipeline** panel shows progress on preparing the library:
+confirmed vs unconfirmed count, ready-to-review count, palette coverage
+with a progress bar, and a per-status breakdown of the browser-conversion
+queue (pending / processing / completed / failed / skipped / none).
+Useful for tracking "how much review work is left" at a glance.
+
+### Cleanup
+
+Two admin endpoints for pruning dead rows without going through the UI:
+
+- `GET /api/maintenance/missing-files` + `POST .../purge` — hard-delete DB
+  rows whose source file no longer exists on disk. Derived assets
+  (thumbs, palette, converted, preview frames) are cleaned too.
+- `GET /api/maintenance/short-videos?max_seconds=420` + `POST .../purge` —
+  preview / remove videos shorter than N seconds. Files go to Windows
+  Recycle Bin (not `unlink`), rows with `duration IS NULL` are skipped,
+  and locked files leave the DB row intact for a later retry.
+
 ## API overview
 
 Prefix: `/api`
@@ -185,14 +203,29 @@ Prefix: `/api`
 | `POST /maintenance/convert/all` / `{id}` / `queue` / `stop` | Trigger / stop conversion |
 | `GET /maintenance/palettes/status` / `missing-count` | Palette worker state |
 | `POST /maintenance/palettes/generate-all` / `generate/{id}` / `stop` | Trigger / stop palette generation |
+| `GET /maintenance/orphans` / `POST .../retry-all` / `{id}/retry` | Soft-deleted rows whose file is still on disk — retry Recycle Bin move |
+| `GET /maintenance/missing-files` / `POST .../purge` | Active rows with no file on disk — hard-delete + clean derived assets |
+| `GET /maintenance/short-videos` / `POST .../purge` | Preview / recycle videos with `duration <= max_seconds` (default 420). NULL durations skipped |
 | `GET /maintenance/encoder` | Active encoder + NVENC availability |
+| `GET /stats` | Overview + pipeline stats (confirmed, palette coverage, convert queue) |
 | `GET /maintenance/debug/video/{id}` | Compare DB metadata to a fresh ffprobe |
 | `POST /maintenance/debug/refresh-metadata/{id}` | Re-extract metadata for a single row |
 
 ## Notes
 
 - Scanner walks libraries recursively, reconciles moved files (same name +
-  size), and soft-deletes rows whose files disappeared.
+  size), and soft-deletes rows whose files disappeared. Files that vanish
+  between directory listing and stat (network-share races, concurrent
+  moves) are skipped silently — next scan picks them up.
+- Palette generation has a single-frame fallback when multi-seek xstack
+  fails on corrupted H.264 NAL streams, so one broken video doesn't block
+  the batch.
+- Server uses `timeout_graceful_shutdown=3` so Ctrl+C doesn't hang waiting
+  for open Range streams from the browser.
+- WatchPage keyboard shortcuts are bound globally (capture phase on
+  `window`), not on the video element — they work regardless of which UI
+  element has focus: `F` fullscreen, `Space` play/pause, `←/→` seek ±5 s,
+  `↑/↓` volume ±10 %.
 - If `ffprobe` is not installed, videos still get indexed but duration /
   resolution / codec stay empty.
 - If file-based SQLite isn't writable, the backend falls back to an
