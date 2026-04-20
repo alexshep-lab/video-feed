@@ -7,7 +7,13 @@ from pathlib import Path
 from ..config import get_settings
 
 
-SUPPORTED_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv"}
+SUPPORTED_EXTENSIONS = {
+    ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv",
+    # Legacy / non-browser containers — indexed so the converter can turn them
+    # into MP4. Without these in the whitelist, scanner.py prunes the files
+    # before they ever reach ffprobe.
+    ".flv", ".mpg", ".mpeg", ".asf", ".mts", ".m2ts", ".ts", ".3gp",
+}
 
 
 def is_supported_video_file(path: Path) -> bool:

@@ -24,6 +24,17 @@ VIDEOFEED_LIBRARY_DIRS_RAW=G:\AlexShep_Labs_Projects\video_feed\videos;D:\MyVide
 On Windows, separate folders with `;`. You can also add/remove libraries
 at runtime from the UI (Library page).
 
+`VIDEOFEED_CONVERTED_DIR_RAW` optionally overrides where WMV/AVI→MP4
+conversion output lands. Defaults to `<media_dir>/converted`, but converted
+MP4s can easily grow to hundreds of GB — move them to another drive with:
+
+```env
+VIDEOFEED_CONVERTED_DIR_RAW=L:\Prvt\Converted
+```
+
+If this path sits inside a registered library folder, the scanner skips it
+automatically so your own converted MP4s aren't re-ingested as new videos.
+
 ### Optional: encoder mode
 
 `VIDEOFEED_ENCODER_MODE` (`auto` / `cpu` / `nvenc`) picks the video encoder
@@ -53,7 +64,9 @@ For production you build with `npm run build` and copy `frontend/dist/` into
 
 - Infinite-scroll grid with adjustable tile size
 - Thumbnails, hover preview (8 frames) and duration overlay on each card
-- Filters: search, tag, category, library folder, codec, duration, vertical/landscape, favorite
+- Filters: search, **multi-tag** (type-ahead search, click to toggle; default
+  OR across selected tags, toggle to AND when ≥2 tags selected), category,
+  library folder, codec, duration, vertical/landscape, favorite
 - Sort by newest / oldest / title / duration / size / most viewed / last watched / shuffle
 - Multi-folder scanning (`videos/` plus any external paths in `.env`);
   subfolders containing videos are auto-registered and enabled
@@ -121,6 +134,12 @@ Non-browser-playable containers are converted to H.264/AAC/MP4.
   re-encoded. Seconds per file instead of minutes.
 - **Full re-encode** with NVENC for real WMV3/VC-1/MPEG-4 ASP sources, with
   automatic CPU-decode fallback if NVDEC rejects the codec
+- **Two parallel workers** (see `CONCURRENCY` in `converter.py`) saturate
+  NVENC on Turing-class GPUs while leaving headroom for HLS/compression;
+  remux jobs are GPU-free so they coexist cleanly with encode jobs
+- **Encoder preset `p1`** (ultrafast NVENC) — batch path optimized for
+  throughput on low-quality WMV sources where visual loss vs p3/p4 is not
+  perceptible
 - Original WMV/AVI is kept in place — conversion output goes to
   `media/converted/{video_id}.mp4` and `converted_path` is stored on the row
 - Scanner auto-queues new WMV/AVI (no auto-queue on startup — jobs picked
@@ -129,6 +148,23 @@ Non-browser-playable containers are converted to H.264/AAC/MP4.
   wins surface first), smallest, largest, or name
 - Multi-select checkboxes for custom batching ("Convert Selected")
 - Hidden under a spoiler so the page stays light for huge libraries
+
+#### Replace converted originals
+
+After a WMV/AVI is successfully converted, the original source sits on disk
+next to a much smaller MP4 (in `converted/`). This section batch-replaces
+each pair:
+
+- MP4 is moved from `converted/{uuid}.mp4` to the original's library folder
+  as `<stem>.mp4` (in-drive rename, instant when same drive)
+- Original WMV/AVI goes to the Windows Recycle Bin
+- DB row is flattened: `original_path` now points at the in-library MP4,
+  `converted_path` is cleared, `convert_status` becomes `skipped`
+- If a pre-existing `.mp4` with the same stem is already there (not ours),
+  that row is skipped to avoid collisions
+
+Reclaimable-size counter shows how many bytes the WMV/AVI originals occupy
+before you commit.
 
 #### Video palettes (contact sheets)
 
@@ -177,7 +213,7 @@ Prefix: `/api`
 
 | Endpoint | Notes |
 |---|---|
-| `GET /videos` | List with all filters; accepts `ready=true` |
+| `GET /videos` | List with all filters; `ready=true`, repeatable `tags=` with `tag_mode=any` (OR, default) or `tag_mode=all` (AND) |
 | `GET /videos/count` | Matching count for the current filters |
 | `GET /videos/next?after={id}` | Next video matching same filters — used by review auto-advance |
 | `GET /videos/filters` | Available categories / codecs / tags / libraries |
@@ -200,6 +236,7 @@ Prefix: `/api`
 | `GET /maintenance/compress/...` | Candidates list, status, stop |
 | `POST /maintenance/compress/...` | Single / batch / oversized / stop |
 | `GET /maintenance/convert/status` / `candidates` | Convert worker state + paginated list |
+| `GET /maintenance/converted-originals` / `POST .../replace` | List + batch-replace: move MP4 into library, Recycle WMV/AVI |
 | `POST /maintenance/convert/all` / `{id}` / `queue` / `stop` | Trigger / stop conversion |
 | `GET /maintenance/palettes/status` / `missing-count` | Palette worker state |
 | `POST /maintenance/palettes/generate-all` / `generate/{id}` / `stop` | Trigger / stop palette generation |

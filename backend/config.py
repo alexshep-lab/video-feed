@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     library_dirs_raw: str | None = None
     data_dir: Path = Field(default=APPDATA_ROOT / "data")
     media_dir: Path = Field(default=APPDATA_ROOT / "media")
+    # Optional override for converted MP4 output (WMV/AVI -> MP4). If unset,
+    # defaults to `media_dir / "converted"`. Split out because converted
+    # videos can easily run to hundreds of GB and often need to live on a
+    # different drive than the other (small) derived assets.
+    converted_dir_raw: str | None = None
     database_path: Path = Field(default=APPDATA_ROOT / "data" / "videofeed.db")
     ffprobe_binary: str = "ffprobe"
     ffmpeg_binary: str = "ffmpeg"
@@ -69,6 +74,8 @@ class Settings(BaseSettings):
 
     @property
     def converted_dir(self) -> Path:
+        if self.converted_dir_raw:
+            return Path(self.converted_dir_raw).expanduser()
         return self.media_dir / "converted"
 
     @property

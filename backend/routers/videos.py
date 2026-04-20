@@ -45,6 +45,44 @@ def _video_is_review_ready(video: Video) -> bool:
     return palette_exists(video.id)
 
 
+def _apply_tag_filters(
+    statement,
+    tag: str | None,
+    tags: list[str] | None,
+    tag_mode: str = "any",
+):
+    """Narrow a Video select by tag(s).
+
+    ``tag_mode="any"`` (default) — OR: video has at least one listed tag.
+    ``tag_mode="all"``            — AND: video has every listed tag.
+    """
+    names: list[str] = []
+    if tag:
+        names.append(tag)
+    if tags:
+        names.extend(t for t in tags if t)
+    seen: set[str] = set()
+    unique = [n for n in names if not (n in seen or seen.add(n))]
+    if not unique:
+        return statement
+    if tag_mode == "all":
+        for name in unique:
+            sub = (
+                select(video_tags.c.video_id)
+                .join(Tag, Tag.id == video_tags.c.tag_id)
+                .where(Tag.name == name)
+            )
+            statement = statement.where(Video.id.in_(sub))
+    else:
+        sub = (
+            select(video_tags.c.video_id)
+            .join(Tag, Tag.id == video_tags.c.tag_id)
+            .where(Tag.name.in_(unique))
+        )
+        statement = statement.where(Video.id.in_(sub))
+    return statement
+
+
 # ---- List / Search / Filter ----
 
 @router.get("", response_model=list[VideoListItem])
@@ -52,6 +90,8 @@ def list_videos(
     request: Request,
     q: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    tags: list[str] | None = Query(default=None),
+    tag_mode: str = Query(default="any", pattern="^(any|all)$"),
     category: str | None = Query(default=None),
     library: str | None = Query(default=None),
     codec: str | None = Query(default=None),
@@ -94,8 +134,7 @@ def list_videos(
         statement = statement.where(
             or_(Video.title.ilike(pattern), Video.original_filename.ilike(pattern))
         )
-    if tag:
-        statement = statement.join(video_tags).join(Tag).where(Tag.name == tag)
+    statement = _apply_tag_filters(statement, tag, tags, tag_mode)
     if category:
         statement = statement.where(Video.category == category)
     if library:
@@ -129,6 +168,8 @@ def list_videos(
 def count_videos(
     q: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    tags: list[str] | None = Query(default=None),
+    tag_mode: str = Query(default="any", pattern="^(any|all)$"),
     category: str | None = Query(default=None),
     library: str | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -147,8 +188,7 @@ def count_videos(
         statement = statement.where(
             or_(Video.title.ilike(pattern), Video.original_filename.ilike(pattern))
         )
-    if tag:
-        statement = statement.select_from(Video).join(video_tags).join(Tag).where(Tag.name == tag)
+    statement = _apply_tag_filters(statement.select_from(Video), tag, tags, tag_mode)
     if category:
         statement = statement.where(Video.category == category)
     if library:
@@ -166,6 +206,8 @@ def next_video(
     after: str | None = Query(default=None, description="ID of the current video — returned next will come after it"),
     q: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    tags: list[str] | None = Query(default=None),
+    tag_mode: str = Query(default="any", pattern="^(any|all)$"),
     category: str | None = Query(default=None),
     library: str | None = Query(default=None),
     codec: str | None = Query(default=None),
@@ -211,8 +253,7 @@ def next_video(
         statement = statement.where(
             or_(Video.title.ilike(pattern), Video.original_filename.ilike(pattern))
         )
-    if tag:
-        statement = statement.join(video_tags).join(Tag).where(Tag.name == tag)
+    statement = _apply_tag_filters(statement, tag, tags, tag_mode)
     if category:
         statement = statement.where(Video.category == category)
     if library:
@@ -436,6 +477,21 @@ def delete_video(
             video.deleted_at = datetime.now(timezone.utc)
             db.commit()
             return {"status": "deleted_soft_fallback", "move_error": move_error}
+        # Clean up derived MP4 + cached thumbs/palette so we don't leak orphans
+        # into converted_dir after the row is gone. Converted output is a
+        # regenerable transcode, so plain unlink (not Recycle) is fine.
+        try:
+            if video.converted_path:
+                cp = Path(video.converted_path)
+                if cp.exists():
+                    os.remove(cp)
+        except Exception:
+            pass
+        try:
+            from ..services.thumbnail import invalidate_video_cache
+            invalidate_video_cache(video.id)
+        except Exception:
+            pass
         _purge_related(video.id)
         db.delete(video)
         db.commit()
@@ -593,6 +649,21 @@ def bulk_action(
                     os.remove(p)
             except Exception:
                 pass
+            try:
+                if video.converted_path:
+                    cp = Path(video.converted_path)
+                    if cp.exists():
+                        os.remove(cp)
+            except Exception:
+                pass
+            try:
+                from ..services.thumbnail import invalidate_video_cache
+                invalidate_video_cache(video.id)
+            except Exception:
+                pass
+            from ..models import WatchEvent, WatchProgress
+            db.query(WatchEvent).filter(WatchEvent.video_id == vid).delete(synchronize_session=False)
+            db.query(WatchProgress).filter(WatchProgress.video_id == vid).delete(synchronize_session=False)
             db.delete(video)
         affected += 1
     db.commit()

@@ -8,10 +8,19 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..models import LibraryFolder, Tag, Video
 from .converter import enqueue_convert, needs_conversion, start_convert_worker
 from .metadata import SUPPORTED_EXTENSIONS, extract_video_metadata
 from .thumbnail import generate_thumbnail
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
 
 # Shared scan progress state (thread-safe reads)
 _scan_progress = {
@@ -100,6 +109,11 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
     # and non-video file too (tens of thousands on a big library), and is_file()
     # is a syscall per entry. Suffix check is a cheap string op, so we prune
     # the obvious non-matches before touching the disk.
+    # Converted-output directory may sit inside a registered library root
+    # (e.g. L:\Prvt\Converted under library L:\Prvt). Skip it so the scanner
+    # doesn't re-ingest our own derived MP4s as new videos.
+    converted_dir = get_settings().converted_dir
+
     total = 0
     all_files: list[tuple[Path, Path]] = []  # (file_path, library_dir)
     for library_dir in library_dirs:
@@ -107,6 +121,8 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
             continue
         for path in library_dir.rglob("*"):
             if path.suffix.lower() in SUPPORTED_EXTENSIONS and path.is_file():
+                if _is_under(path, converted_dir):
+                    continue
                 all_files.append((path, library_dir))
                 total += 1
     all_files.sort(key=lambda item: str(item[0]))
@@ -114,13 +130,19 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
     _update_progress(total_files=total, phase="scanning")
     current_paths = {sanitize_text(str(path.resolve())) or "" for path, _ in all_files}
 
-    # Phase 1.5: Auto-register subfolders that contain videos as LibraryFolder entries
+    # Phase 1.5: Auto-register subfolders that contain videos as LibraryFolder entries.
+    # Group by parent directory first so we only resolve() each unique parent once —
+    # on large libraries (11k+ files, ~150 unique parents) this skips ~10k syscalls.
     existing_folder_paths = {f.path for f in session.scalars(select(LibraryFolder)).all()}
-    dirs_with_videos: set[str] = set()
+    unique_parents: set[Path] = set()
     for file_path, _ in all_files:
-        parent = str(file_path.resolve().parent)
-        if parent not in existing_folder_paths and parent not in dirs_with_videos:
-            dirs_with_videos.add(parent)
+        unique_parents.add(file_path.parent)
+
+    dirs_with_videos: set[str] = set()
+    for parent in unique_parents:
+        resolved = str(parent.resolve())
+        if resolved not in existing_folder_paths:
+            dirs_with_videos.add(resolved)
 
     for dir_path in sorted(dirs_with_videos):
         p = Path(dir_path)
@@ -137,6 +159,12 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
         ).all()
         library_dirs = [Path(f.path) for f in folders]
 
+    # Resolve library dirs ONCE — they're referenced per-file for library_path
+    # comparison and folder-tag matching. Without this cache, resolve() is a
+    # syscall that repeats for every file × every library dir (millions of
+    # redundant syscalls on a 11k-video library).
+    library_dir_resolved: dict[Path, Path] = {ld: ld.resolve() for ld in library_dirs}
+
     # Build lookup of existing videos by path for fast dedup
     all_videos = session.scalars(select(Video)).all()
     existing_by_path: dict[str, Video] = {v.original_path: v for v in all_videos}
@@ -151,7 +179,9 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
 
     for path, library_dir in all_files:
         scanned_files += 1
-        resolved = str(path.resolve())
+        path_resolved = path.resolve()
+        resolved = str(path_resolved)
+        lib_resolved = library_dir_resolved[library_dir]
         try:
             stat = path.stat()
         except (FileNotFoundError, OSError):
@@ -173,14 +203,24 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
         )
 
         if existing and not needs_metadata:
-            lib_path = sanitize_text(str(library_dir.resolve()))
-            if existing.library_path != lib_path:
+            lib_path = sanitize_text(str(lib_resolved))
+            library_moved = existing.library_path != lib_path
+            if library_moved:
                 existing.library_path = lib_path
                 updated += 1
                 batch_count += 1
             else:
                 unchanged += 1
-            _apply_folder_tags(session, existing, path, library_dir, tag_cache, library_dirs)
+            # Skip tag reapplication on the hot "nothing changed" path: the video
+            # is at the same location and already has its folder tags. Only run
+            # when the library_path shifted OR the video somehow has no tags yet
+            # (newly moved in from find_moved_video_candidate in a prior scan,
+            # or a row created before the auto-tag logic existed).
+            if library_moved or not existing.tag_objects:
+                _apply_folder_tags(
+                    session, existing, path_resolved, lib_resolved,
+                    tag_cache, library_dir_resolved,
+                )
             _update_progress(processed=scanned_files)
             if batch_count >= BATCH_SIZE:
                 session.commit()
@@ -213,7 +253,7 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
             "title": sanitize_text(build_title(path)),
             "original_filename": sanitize_text(path.name),
             "original_path": sanitize_text(resolved),
-            "library_path": sanitize_text(str(library_dir.resolve())),
+            "library_path": sanitize_text(str(lib_resolved)),
             "file_size": current_size,
             "file_mtime": current_mtime,
             "duration": metadata.get("duration"),
@@ -225,7 +265,8 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
 
         if existing is None:
             video = Video(**payload)
-            if needs_conversion(path):
+            file_needs_convert = needs_conversion(path, payload.get("codec"))
+            if file_needs_convert:
                 video.convert_status = "pending"
             session.add(video)
             session.flush()
@@ -235,9 +276,12 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
             except Exception:
                 video.thumbnail_path = None
             existing_by_path[resolved] = video
-            _apply_folder_tags(session, video, path, library_dir, tag_cache, library_dirs)
+            _apply_folder_tags(
+                session, video, path_resolved, lib_resolved,
+                tag_cache, library_dir_resolved,
+            )
             created += 1
-            if needs_conversion(path):
+            if file_needs_convert:
                 pending_conversion_ids.append(video.id)
         else:
             # Source content changed (size/mtime differ) → cached conversion is stale.
@@ -255,7 +299,7 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
                 setattr(existing, key, value)
 
             # Re-queue conversion if the (now-updated) file still needs it.
-            if needs_metadata and needs_conversion(path) and existing.convert_status in ("none", "failed"):
+            if needs_metadata and needs_conversion(path, payload.get("codec")) and existing.convert_status in ("none", "failed"):
                 existing.convert_status = "pending"
                 existing.convert_progress = 0.0
                 pending_conversion_ids.append(existing.id)
@@ -266,7 +310,10 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
                     existing.thumbnail_path = str(thumbnail)
                 except Exception:
                     pass
-            _apply_folder_tags(session, existing, path, library_dir, tag_cache, library_dirs)
+            _apply_folder_tags(
+                session, existing, path_resolved, lib_resolved,
+                tag_cache, library_dir_resolved,
+            )
             updated += 1
 
         batch_count += 1
@@ -277,7 +324,9 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
             batch_count = 0
 
     # Soft-delete stale records whose files disappeared from scanned libraries.
-    scanned_roots = [library_dir.resolve() for library_dir in library_dirs if library_dir.exists()]
+    scanned_roots = [
+        resolved for ld, resolved in library_dir_resolved.items() if ld.exists()
+    ]
     for video in all_videos:
         if video.deleted_at is not None or not video.original_path:
             continue
@@ -332,10 +381,10 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
 def _apply_folder_tags(
     session: Session,
     video: Video,
-    file_path: Path,
-    library_dir: Path,
+    file_resolved: Path,
+    library_dir_resolved: Path,
     tag_cache: dict[str, Tag],
-    all_library_dirs: list[Path],
+    all_library_dirs_resolved: dict[Path, Path],
 ) -> None:
     """Auto-tag a video with folder names from registered ancestor libraries.
 
@@ -343,14 +392,16 @@ def _apply_folder_tags(
     folders [D:\\Videos, D:\\Videos\\Foreign, D:\\Videos\\Foreign\\Russian\\Alice]:
     Tags: "videos", "foreign", "alice"
     Also tags with subfolder names between library_dir and the file.
+
+    Callers pass pre-resolved Paths so we don't repeat resolve() syscalls inside
+    the hot scan loop — resolving ~150 library dirs × 11k files was the bulk of
+    per-file overhead on networked drives.
     """
-    file_resolved = file_path.resolve()
     seen: set[str] = set()
     folder_names: list[str] = []
 
     # 1) Collect names of ALL registered library folders that are ancestors of this file
-    for lib_dir in all_library_dirs:
-        lib_resolved = lib_dir.resolve()
+    for lib_resolved in all_library_dirs_resolved.values():
         try:
             file_resolved.relative_to(lib_resolved)
             # This folder is an ancestor — add its name as a tag
@@ -364,7 +415,7 @@ def _apply_folder_tags(
 
     # 2) Also add subfolder names within the library_dir (for unregistered intermediate folders)
     try:
-        relative = file_resolved.relative_to(library_dir.resolve())
+        relative = file_resolved.relative_to(library_dir_resolved)
         for part in relative.parts[:-1]:  # Exclude filename
             name = part.lower().strip()
             name = sanitize_text(name) or ""

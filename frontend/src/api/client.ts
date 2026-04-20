@@ -76,6 +76,8 @@ export type LibraryFolder = { id: number; path: string; enabled: boolean; is_inc
 export type VideoFilters = {
   q?: string;
   tag?: string;
+  tags?: string[];
+  tag_mode?: "any" | "all";
   category?: string;
   library?: string;
   codec?: string;
@@ -92,7 +94,12 @@ export type VideoFilters = {
 export async function fetchVideos(filters: VideoFilters = {}): Promise<VideoItem[]> {
   const url = new URL(`${API_BASE}/videos`);
   Object.entries(filters).forEach(([k, v]) => {
-    if (v !== undefined && v !== "" && v !== null) url.searchParams.set(k, String(v));
+    if (v === undefined || v === null || v === "") return;
+    if (Array.isArray(v)) {
+      v.forEach((item) => { if (item !== "" && item !== null && item !== undefined) url.searchParams.append(k, String(item)); });
+    } else {
+      url.searchParams.set(k, String(v));
+    }
   });
   const response = await fetch(url);
   if (!response.ok) throw new Error("Failed to load videos");
@@ -325,8 +332,72 @@ export async function convertBatch(videoIds: string[]): Promise<{ status: string
   return r.json();
 }
 
+export type ConvertedOriginal = {
+  id: string;
+  title: string;
+  original_path: string;
+  original_size: number;
+  converted_path: string;
+};
+
+export async function fetchConvertedOriginals(): Promise<{ count: number; reclaimable_bytes: number; items: ConvertedOriginal[] }> {
+  const r = await fetch(`${API_BASE}/maintenance/converted-originals`);
+  return r.json();
+}
+
+export async function replaceConvertedOriginals(): Promise<{
+  replaced: number;
+  skipped_collision: number;
+  move_failed: number;
+  recycle_failed: number;
+  errors: { id: string; reason: string; error?: string; target?: string }[];
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/converted-originals/replace`, { method: "POST" });
+  return r.json();
+}
+
 export async function fetchEncoderInfo(): Promise<{ effective: string; nvenc_available: boolean }> {
   const r = await fetch(`${API_BASE}/maintenance/encoder`);
+  return r.json();
+}
+
+// ---- Compress archive (big_archive_dir) management ----
+
+export type ArchiveItem = {
+  path: string;
+  name: string;
+  size: number;
+  mtime: number;
+  age_days: number;
+};
+
+export type ArchiveListing = {
+  path: string;
+  exists: boolean;
+  total_size: number;
+  file_count: number;
+  items: ArchiveItem[];
+};
+
+export async function fetchCompressArchive(): Promise<ArchiveListing> {
+  const r = await fetch(`${API_BASE}/maintenance/compress/archive`);
+  return r.json();
+}
+
+export async function purgeCompressArchive(body: {
+  older_than_days?: number | null;
+  paths?: string[] | null;
+}): Promise<{
+  recycled: number;
+  failed: number;
+  total_bytes_freed: number;
+  errors: { path: string; error: string }[];
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/compress/archive/purge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return r.json();
 }
 
@@ -429,7 +500,12 @@ export async function fetchNextVideo(
   const url = new URL(`${API_BASE}/videos/next`);
   url.searchParams.set("after", afterId);
   Object.entries(filters).forEach(([k, v]) => {
-    if (v !== undefined && v !== "" && v !== null) url.searchParams.set(k, String(v));
+    if (v === undefined || v === null || v === "") return;
+    if (Array.isArray(v)) {
+      v.forEach((item) => { if (item !== "" && item !== null && item !== undefined) url.searchParams.append(k, String(item)); });
+    } else {
+      url.searchParams.set(k, String(v));
+    }
   });
   const r = await fetch(url);
   return r.json();

@@ -10,9 +10,10 @@ import asyncio
 import logging
 import re
 import shutil
+import time
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -81,9 +82,19 @@ def enqueue_compress(video_id: str) -> None:
 
 
 def get_oversized_candidates(session: Session, min_height: int = 1440, force: bool = False) -> list[Video]:
+    # Threshold is applied to the SHORTER side, not `height`. For portrait
+    # videos `height` is the long axis, so the old `Video.height > min_height`
+    # check flagged a 1080x1920 FHD vertical as a QHD+ candidate. The compressor
+    # target is a 1920x1080 box regardless of orientation, so what matters is
+    # whether the video's shorter side exceeds the box's shorter side.
+    shorter_side = case(
+        (Video.width > Video.height, Video.height),
+        else_=Video.width,
+    )
     statement = select(Video).where(
         Video.height.is_not(None),
-        Video.height > min_height,
+        Video.width.is_not(None),
+        shorter_side > min_height,
         Video.deleted_at.is_(None),
     )
     if force:
@@ -249,11 +260,23 @@ async def _compress_video(video_id: str) -> None:
             )
             return
         duration = video.duration or 0
+        src_width = video.width or 0
+        src_height = video.height or 0
 
     out_path = build_compressed_output_path(src)
     archive_path = build_archive_path(src, settings.big_archive_dir)
 
     _update_status(video_id, "processing", 0.0)
+
+    # Target box is 1920×1080 laid out by orientation. Unconditionally capping
+    # height at 1080 would squash a portrait 2160×3840 source down to ~607×1080,
+    # throwing away half the usable resolution. For portrait the box becomes
+    # 1080×1920 (width capped at 1080, height at 1920). `force_original_aspect_ratio=decrease`
+    # does the rest — the video is scaled to fit inside the box preserving AR.
+    if src_height > src_width and src_width > 0:
+        target_w, target_h = 1080, 1920  # portrait
+    else:
+        target_w, target_h = 1920, TARGET_HEIGHT  # landscape / square (default)
 
     encoder_args = build_quality_video_args(crf_or_cq=CRF, preset=PRESET)
     encoder_name = get_effective_encoder()
@@ -264,7 +287,7 @@ async def _compress_video(video_id: str) -> None:
         "-nostats",
         "-progress", "pipe:2",
         "-i", str(src),
-        "-vf", f"scale='min(1920,iw)':'min({TARGET_HEIGHT},ih)':force_original_aspect_ratio=decrease",
+        "-vf", f"scale='min({target_w},iw)':'min({target_h},ih)':force_original_aspect_ratio=decrease",
         *encoder_args,
         "-c:a", "aac",
         "-b:a", AUDIO_BITRATE,
@@ -463,6 +486,144 @@ def _merge_into_existing(
     source.deleted_at = datetime.now(timezone.utc)
     source.compress_status = "completed"
     source.compress_progress = 100.0
+
+
+# ---- Archived originals (big_archive_dir) management --------------------
+#
+# Note on drive economics: after a successful compress we `shutil.move` the
+# source into `big_archive_dir`. When the archive lives on the SAME physical
+# drive as the library (the default), move() degenerates into a rename and
+# frees zero bytes. The compressed FHD.mp4 is pure addition — the drive gets
+# *fuller*, not freer. These helpers let the user actually reclaim that space
+# by recycle-binning archived originals once they've decided the FHD copy is
+# good enough.
+
+def list_archive(archive_root: Path) -> dict:
+    """Walk the archive root; return size summary + file list (oldest first)."""
+    root_str = str(archive_root)
+    if not archive_root.exists() or not archive_root.is_dir():
+        return {
+            "path": root_str,
+            "exists": False,
+            "total_size": 0,
+            "file_count": 0,
+            "items": [],
+        }
+
+    items: list[dict] = []
+    total = 0
+    now = time.time()
+    for path in archive_root.rglob("*"):
+        try:
+            if not path.is_file():
+                continue
+            st = path.stat()
+        except OSError:
+            continue
+        items.append({
+            "path": str(path),
+            "name": path.name,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+            "age_days": int(max(0, (now - st.st_mtime) // 86400)),
+        })
+        total += st.st_size
+
+    items.sort(key=lambda it: it["mtime"])  # oldest first — easier to skim "what's safe to drop"
+    return {
+        "path": root_str,
+        "exists": True,
+        "total_size": total,
+        "file_count": len(items),
+        "items": items,
+    }
+
+
+def purge_archive(
+    archive_root: Path,
+    older_than_days: int | None = None,
+    paths: list[str] | None = None,
+) -> dict:
+    """Recycle-bin archived originals.
+
+    Selection rules (checked in order):
+      - If ``paths`` is non-empty: only those explicit paths are recycled.
+      - Else if ``older_than_days`` is set: files with mtime older than the
+        cutoff are recycled.
+      - Else: every file under ``archive_root`` is recycled.
+
+    Every candidate must resolve to a path *inside* ``archive_root`` — this
+    blocks path-traversal from the ``paths`` list. We also only touch regular
+    files; directories are left alone (empty ones can be cleaned manually).
+    """
+    from .fileops import move_to_recycle_bin
+
+    if not archive_root.exists() or not archive_root.is_dir():
+        return {"recycled": 0, "failed": 0, "total_bytes_freed": 0, "errors": []}
+
+    try:
+        root_resolved = archive_root.resolve()
+    except (OSError, RuntimeError):
+        return {"recycled": 0, "failed": 0, "total_bytes_freed": 0, "errors": [
+            {"path": str(archive_root), "error": "archive_root resolve failed"},
+        ]}
+
+    candidates: list[Path] = []
+    if paths:
+        for raw in paths:
+            try:
+                cand = Path(raw)
+                cand_resolved = cand.resolve()
+            except (OSError, RuntimeError):
+                continue
+            try:
+                cand_resolved.relative_to(root_resolved)
+            except ValueError:
+                # Rejected: outside archive_root. Don't recycle.
+                continue
+            if cand_resolved.is_file():
+                candidates.append(cand_resolved)
+    else:
+        cutoff: float | None = None
+        if older_than_days is not None and older_than_days >= 0:
+            cutoff = time.time() - older_than_days * 86400
+        for path in archive_root.rglob("*"):
+            try:
+                if not path.is_file():
+                    continue
+                if cutoff is not None and path.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            candidates.append(path)
+
+    recycled = 0
+    failed = 0
+    bytes_freed = 0
+    errors: list[dict] = []
+    for path in candidates:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        try:
+            move_to_recycle_bin(path)
+            recycled += 1
+            bytes_freed += size
+        except Exception as exc:
+            failed += 1
+            errors.append({"path": str(path), "error": str(exc)})
+
+    logger.info(
+        "Archive purge: recycled=%d failed=%d freed=%d bytes (older_than_days=%s, explicit_paths=%d)",
+        recycled, failed, bytes_freed, older_than_days, len(paths or []),
+    )
+    return {
+        "recycled": recycled,
+        "failed": failed,
+        "total_bytes_freed": bytes_freed,
+        "errors": errors[:30],
+    }
 
 
 def _update_status(video_id: str, status: str, progress: float) -> None:

@@ -44,7 +44,9 @@ export default function HomePage() {
   // Filters state
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("shuffle");
-  const [tag, setTag] = useState("");
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [tagMode, setTagMode] = useState<"any" | "all">("any");
+  const [tagSearch, setTagSearch] = useState("");
   const [codec, setCodec] = useState("");
   const [library, setLibrary] = useState("");
 
@@ -72,7 +74,7 @@ export default function HomePage() {
     setPage(0);
     setVideos([]);
     setHasMore(true);
-  }, [q, sort, tag, codec, library, mode, reviewFilter, readyOnly]);
+  }, [q, sort, selectedTags, tagMode, codec, library, mode, reviewFilter, readyOnly]);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,7 +85,10 @@ export default function HomePage() {
     }
     const params: VideoFilters = { sort, limit: PAGE_SIZE, offset: page * PAGE_SIZE };
     if (q) params.q = q;
-    if (tag) params.tag = tag;
+    if (selectedTags.length > 0) {
+      params.tags = selectedTags;
+      if (tagMode === "all") params.tag_mode = "all";
+    }
     if (codec) params.codec = codec;
     if (library) params.library = library;
     if (mode === "unconfirmed") {
@@ -113,7 +118,7 @@ export default function HomePage() {
       });
 
     return () => { cancelled = true; };
-  }, [q, sort, tag, codec, library, mode, reviewFilter, readyOnly, page]);
+  }, [q, sort, selectedTags, tagMode, codec, library, mode, reviewFilter, readyOnly, page]);
 
   useEffect(() => {
     if (loading || loadingMore || !hasMore) return;
@@ -240,25 +245,75 @@ export default function HomePage() {
           <div className="text-xs text-white/40">{tileSize}px</div>
         </div>
 
-        {/* Tags */}
+        {/* Tags — multi-select with substring search.
+            Clicking a tag toggles it in `selectedTags`; the backend ANDs them
+            (video must match every selected tag). */}
         {filters?.tags && filters.tags.length > 0 && (
           <div className="space-y-1">
-            <label className="text-xs uppercase tracking-wider text-white/35">Tag</label>
-            <select value={tag} onChange={(e) => setTag(e.target.value)} className={selectCls}>
-              <option value="">All tags</option>
-              {filters.tags.map((t) => <option key={t.id} value={t.name}>{t.name} ({t.video_count})</option>)}
-            </select>
-            {/* Clickable tag list */}
-            <div className="max-h-48 overflow-y-auto space-y-0.5 mt-1">
-              {filters.tags.map((t) => (
+            <div className="flex items-baseline justify-between">
+              <label className="text-xs uppercase tracking-wider text-white/35">
+                Tags {selectedTags.length > 0 && <span className="text-accent/80 normal-case">· {selectedTags.length} selected</span>}
+              </label>
+              {selectedTags.length > 0 && (
+                <button onClick={() => setSelectedTags([])} className="text-[10px] text-white/40 hover:text-white/80">clear</button>
+              )}
+            </div>
+            {selectedTags.length > 1 && (
+              <div className="flex gap-0 text-[10px] rounded overflow-hidden border border-white/10">
                 <button
-                  key={t.id}
-                  onClick={() => setTag(tag === t.name ? "" : t.name)}
-                  className={`w-full text-left px-2 py-0.5 rounded text-xs transition ${tag === t.name ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white hover:bg-white/5"}`}
+                  onClick={() => setTagMode("any")}
+                  className={`flex-1 py-0.5 transition ${tagMode === "any" ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white/80"}`}
+                  title="Match videos having any of the selected tags"
                 >
-                  {t.name} <span className="text-white/30">({t.video_count})</span>
+                  any (OR)
                 </button>
-              ))}
+                <button
+                  onClick={() => setTagMode("all")}
+                  className={`flex-1 py-0.5 transition ${tagMode === "all" ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white/80"}`}
+                  title="Match only videos having every selected tag"
+                >
+                  all (AND)
+                </button>
+              </div>
+            )}
+            <input
+              type="text"
+              value={tagSearch}
+              onChange={(e) => setTagSearch(e.target.value)}
+              placeholder="Search tags…"
+              className={`${selectCls} text-xs`}
+            />
+            {selectedTags.length > 0 && (
+              <div className="flex flex-wrap gap-1 pt-1">
+                {selectedTags.map((name) => (
+                  <button
+                    key={name}
+                    onClick={() => setSelectedTags(selectedTags.filter((x) => x !== name))}
+                    className="px-1.5 py-0.5 rounded bg-accent/20 text-accent text-[11px] hover:bg-accent/30"
+                    title="Remove"
+                  >
+                    {name} ×
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="max-h-48 overflow-y-auto space-y-0.5 mt-1">
+              {filters.tags
+                .filter((t) => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase()))
+                .map((t) => {
+                  const active = selectedTags.includes(t.name);
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() =>
+                        setSelectedTags(active ? selectedTags.filter((x) => x !== t.name) : [...selectedTags, t.name])
+                      }
+                      className={`w-full text-left px-2 py-0.5 rounded text-xs transition ${active ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white hover:bg-white/5"}`}
+                    >
+                      {t.name} <span className="text-white/30">({t.video_count})</span>
+                    </button>
+                  );
+                })}
             </div>
           </div>
         )}
@@ -404,7 +459,8 @@ export default function HomePage() {
                 if (reviewFilter === "confirmed") reviewParams.set("confirmed", "true");
                 if (readyOnly) reviewParams.set("ready", "true");
                 if (q) reviewParams.set("q", q);
-                if (tag) reviewParams.set("tag", tag);
+                selectedTags.forEach((name) => reviewParams.append("tags", name));
+                if (selectedTags.length > 1 && tagMode === "all") reviewParams.set("tag_mode", "all");
                 if (codec) reviewParams.set("codec", codec);
                 if (library) reviewParams.set("library", library);
                 if (sort) reviewParams.set("sort", sort);

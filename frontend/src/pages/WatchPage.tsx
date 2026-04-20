@@ -66,6 +66,8 @@ export default function WatchPage() {
     if (searchParams.get("ready") === "true") f.ready = true;
     const q = searchParams.get("q"); if (q) f.q = q;
     const tag = searchParams.get("tag"); if (tag) f.tag = tag;
+    const tagsList = searchParams.getAll("tags"); if (tagsList.length > 0) f.tags = tagsList;
+    const tagMode = searchParams.get("tag_mode"); if (tagMode === "all") f.tag_mode = "all";
     const codec = searchParams.get("codec"); if (codec) f.codec = codec;
     const library = searchParams.get("library"); if (library) f.library = library;
     const sort = searchParams.get("sort"); if (sort) f.sort = sort;

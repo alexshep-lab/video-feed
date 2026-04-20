@@ -36,7 +36,43 @@ logger = logging.getLogger("videofeed.converter")
 # .avi: usually Xvid/DivX/MS-MPEG4 + MP3 — no browser support. Some AVIs are
 #       actually H.264-in-AVI, which browsers also don't play (wrong container),
 #       so we still convert but to a cheap MP4 remux when possible.
-NEEDS_CONVERSION_EXTENSIONS: set[str] = {".wmv", ".avi"}
+# .flv: Sorenson Spark / VP6 / rarely H.264 — Flash is dead, browsers don't play it.
+# .mpg/.mpeg: MPEG-1/MPEG-2 program streams — no browser decodes them.
+# .asf: Advanced Systems Format, same family as WMV.
+# .mts/.m2ts/.ts: MPEG-TS (AVCHD camcorders, DVB captures) — usually H.264 so
+#       the remux path handles them cheaply, but the container itself is not
+#       playable in <video>.
+# .3gp: mobile container, usually H.263/AMR — needs re-encode.
+NEEDS_CONVERSION_EXTENSIONS: set[str] = {
+    ".wmv", ".avi",
+    ".flv", ".mpg", ".mpeg", ".asf",
+    ".mts", ".m2ts", ".ts", ".3gp",
+}
+
+# Video codecs that no browser can play natively, regardless of container.
+# A file like `.mkv` containing wmv3 won't be caught by the extension filter
+# above, so we also flag by codec when ffprobe metadata is available.
+#
+# - wmv1/wmv2/wmv3: Windows Media Video 7/8/9
+# - vc1: VC-1 (Windows Media Video 9 Advanced Profile)
+# - msmpeg4v1/v2/v3: Microsoft MPEG-4 variants (DivX ;-), etc.)
+# - mpeg4: MPEG-4 Part 2 (Xvid/DivX) — browsers only support Part 10 (H.264)
+# - flv1: Sorenson Spark (old Flash video)
+# - vp6/vp6f/vp6a: On2 VP6 (Flash)
+# - h263: older mobile codec (.3gp)
+# - mpeg1video/mpeg2video: MPEG-1/2 — browsers never supported them
+# - rv10/rv20/rv30/rv40: RealVideo
+# - theora: Ogg Theora (dropped from modern browsers)
+NEEDS_CONVERSION_CODECS: set[str] = {
+    "wmv1", "wmv2", "wmv3", "vc1",
+    "msmpeg4v1", "msmpeg4v2", "msmpeg4v3",
+    "mpeg4",
+    "flv1", "vp6", "vp6f", "vp6a",
+    "h263",
+    "mpeg1video", "mpeg2video",
+    "rv10", "rv20", "rv30", "rv40",
+    "theora",
+}
 
 # Video codecs that are already H.264-equivalent and don't need re-encode.
 # When the source uses one of these but the container is wrong (e.g. H.264-in-AVI),
@@ -46,56 +82,87 @@ REMUXABLE_VIDEO_CODECS: set[str] = {"h264", "avc1"}
 # Quality target for the converted MP4. Slightly worse than the compressor
 # because the goal is playability, not size reduction.
 #
-# Preset is "fast" (NVENC p3) rather than "medium" (p4). This is a batch
-# import path — the user is converting hundreds of files to glance-review
-# them. Throughput beats archival quality here; the compressor still uses
-# the slower preset when the user chooses to recompress for storage.
+# Preset is "ultrafast" -> NVENC p1 (fastest). This is a batch import path
+# converting hundreds of WMV/AVI for glance-review; p1 is ~40% faster than
+# p3 and on low-quality WMV/VC-1 sources the visual difference is invisible.
+# The compressor still uses the slower preset for archival recompression.
 CRF = 23
-PRESET = "fast"
+PRESET = "ultrafast"
 AUDIO_BITRATE = "160k"
 
+# Two parallel workers saturate NVENC on RTX 2080 (supports ~3 concurrent
+# sessions) while keeping headroom for HLS transcoding / compression if the
+# user kicks those off in parallel. Remux jobs are GPU-free so they coexist
+# fine with encode jobs on the second worker.
+CONCURRENCY = 2
+
 _queue: asyncio.Queue[str] = asyncio.Queue()
-_worker_task: asyncio.Task | None = None
-_current_video_id: str | None = None
-_current_proc: asyncio.subprocess.Process | None = None
+_worker_tasks: list[asyncio.Task] = []
+# Per-worker active job state. Keyed by worker index; value is
+# {"video_id": str, "proc": Process | None}. Only workers that currently hold
+# a job appear in the dict.
+_active: dict[int, dict] = {}
 _batch_total_jobs = 0
 _batch_completed_jobs = 0
 _batch_failed_jobs = 0
 
 
-def needs_conversion(path: str | Path) -> bool:
-    """True if a file's extension is not browser-friendly."""
-    return Path(path).suffix.lower() in NEEDS_CONVERSION_EXTENSIONS
+def needs_conversion(path: str | Path, codec: str | None = None) -> bool:
+    """True if the file isn't browser-playable.
+
+    Matches by extension (fast, always available) OR by video codec when
+    metadata is known. The codec check catches cases like wmv3-in-mkv that
+    the extension filter alone would miss.
+    """
+    if Path(path).suffix.lower() in NEEDS_CONVERSION_EXTENSIONS:
+        return True
+    if codec and codec.lower().strip() in NEEDS_CONVERSION_CODECS:
+        return True
+    return False
 
 
 def get_convert_status() -> dict:
-    current_title = None
-    current_progress = 0.0
-    if _current_video_id:
+    # Collect per-job state. Frontend still expects single `current_*` fields;
+    # we fill those from the first active job and expose the full list as
+    # `active_jobs` for callers that want richer UI later.
+    active_jobs: list[dict] = []
+    progress_sum = 0.0
+    if _active:
         with SessionLocal() as session:
-            video = session.get(Video, _current_video_id)
-            if video:
-                current_title = video.original_filename
-                current_progress = video.convert_progress or 0.0
+            for worker_id in sorted(_active):
+                vid = _active[worker_id]["video_id"]
+                video = session.get(Video, vid)
+                progress = (video.convert_progress or 0.0) if video else 0.0
+                title = video.original_filename if video else None
+                progress_sum += progress
+                active_jobs.append({
+                    "worker_id": worker_id,
+                    "video_id": vid,
+                    "video_title": title,
+                    "progress": round(progress, 1),
+                })
+
+    current_video_id = active_jobs[0]["video_id"] if active_jobs else None
+    current_title = active_jobs[0]["video_title"] if active_jobs else None
+    current_progress = active_jobs[0]["progress"] if active_jobs else 0.0
 
     overall_progress = 0.0
     if _batch_total_jobs > 0:
         overall_progress = min(
-            (
-                _batch_completed_jobs
-                + (current_progress / 100 if _current_video_id else 0.0)
-            )
-            / _batch_total_jobs
-            * 100,
+            (_batch_completed_jobs + progress_sum / 100) / _batch_total_jobs * 100,
             100.0,
         )
 
+    worker_running = any(t for t in _worker_tasks if not t.done())
+
     return {
         "queue_size": _queue.qsize(),
-        "current_video_id": _current_video_id,
+        "current_video_id": current_video_id,
         "current_video_title": current_title,
-        "current_progress": round(current_progress, 1),
-        "worker_running": _worker_task is not None and not _worker_task.done(),
+        "current_progress": current_progress,
+        "active_jobs": active_jobs,
+        "concurrency": CONCURRENCY,
+        "worker_running": worker_running,
         "batch_total_jobs": _batch_total_jobs,
         "batch_completed_jobs": _batch_completed_jobs,
         "batch_failed_jobs": _batch_failed_jobs,
@@ -120,7 +187,10 @@ def _base_pending_conversion_query():
     return select(Video).where(
         Video.deleted_at.is_(None),
         Video.convert_status.in_(["none", "pending", "failed"]),
-        or_(*_ext_filter_clauses()),
+        or_(
+            *_ext_filter_clauses(),
+            func.lower(func.trim(Video.codec)).in_(NEEDS_CONVERSION_CODECS),
+        ),
     )
 
 
@@ -190,8 +260,8 @@ def enqueue_all_pending_conversions(session: Session) -> int:
     # a long queue of heavy WMV transcodes before the fast ones get a turn.
     videos = list(session.scalars(_apply_sort(_base_pending_conversion_query(), "h264_first")).all())
     queued_ids = {item for item in list(_queue._queue) if item != "__STOP__"}  # type: ignore[attr-defined]
-    if _current_video_id:
-        queued_ids.add(_current_video_id)
+    for slot in _active.values():
+        queued_ids.add(slot["video_id"])
 
     count = 0
     for v in videos:
@@ -208,18 +278,20 @@ def enqueue_all_pending_conversions(session: Session) -> int:
 
 
 def start_convert_worker() -> None:
-    global _worker_task
-    if _worker_task and not _worker_task.done():
-        return
-    _worker_task = asyncio.create_task(_worker_loop())
+    # Prune finished tasks (e.g. after a previous run crashed) then spin up
+    # however many more we need to reach CONCURRENCY.
+    global _worker_tasks
+    _worker_tasks = [t for t in _worker_tasks if not t.done()]
+    while len(_worker_tasks) < CONCURRENCY:
+        worker_id = len(_worker_tasks)
+        _worker_tasks.append(asyncio.create_task(_worker_loop(worker_id)))
 
 
 def stop_convert_all() -> dict:
-    """Drain the queue, kill the active ffmpeg, reset batch tracking.
+    """Drain the queue, kill any active ffmpegs, reset batch tracking.
 
-    Worker stays alive and idle for future enqueues. The partial output MP4
-    (if any) is cleaned up inside ``_convert_video`` when the proc returns
-    a non-zero code.
+    Workers stay alive and idle for future enqueues. Partial output MPs
+    are cleaned up inside ``_convert_video`` when the proc returns non-zero.
     """
     global _batch_total_jobs
     dropped = 0
@@ -231,63 +303,70 @@ def stop_convert_all() -> dict:
         except asyncio.QueueEmpty:
             break
 
-    killed = False
-    if _current_proc is not None and _current_proc.returncode is None:
-        try:
-            _current_proc.kill()
-            killed = True
-        except ProcessLookupError:
-            pass
+    killed = 0
+    interrupted_ids: list[str] = []
+    for slot in list(_active.values()):
+        proc = slot.get("proc")
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                killed += 1
+            except ProcessLookupError:
+                pass
+        vid = slot["video_id"]
+        interrupted_ids.append(vid)
+        _update_status(vid, "failed", 0.0)
 
-    _batch_total_jobs = _batch_completed_jobs + _batch_failed_jobs + (1 if _current_video_id else 0)
+    _batch_total_jobs = _batch_completed_jobs + _batch_failed_jobs + len(_active)
 
-    interrupted_id = _current_video_id
-    if interrupted_id:
-        _update_status(interrupted_id, "failed", 0.0)
-
-    logger.warning("Convert STOP: dropped=%d killed_current=%s interrupted=%s",
-                   dropped, killed, interrupted_id)
+    logger.warning("Convert STOP: dropped=%d killed=%d interrupted=%s",
+                   dropped, killed, interrupted_ids)
     return {
         "dropped_queued": dropped,
-        "killed_current": killed,
-        "interrupted_video_id": interrupted_id,
+        "killed_current": killed > 0,
+        "killed_count": killed,
+        "interrupted_video_id": interrupted_ids[0] if interrupted_ids else None,
+        "interrupted_video_ids": interrupted_ids,
     }
 
 
 async def stop_convert_worker() -> None:
-    global _worker_task
-    if _worker_task and not _worker_task.done():
+    global _worker_tasks
+    alive = [t for t in _worker_tasks if not t.done()]
+    for _ in alive:
         _queue.put_nowait("__STOP__")
-        _worker_task.cancel()
+    for t in alive:
+        t.cancel()
+    for t in alive:
         try:
-            await asyncio.wait_for(_worker_task, timeout=2.0)
+            await asyncio.wait_for(t, timeout=2.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
-    _worker_task = None
+    _worker_tasks = []
 
 
-async def _worker_loop() -> None:
-    global _current_video_id, _current_proc, _batch_completed_jobs, _batch_failed_jobs
-    logger.info("Convert worker started (encoder=%s)", get_effective_encoder())
+async def _worker_loop(worker_id: int) -> None:
+    global _batch_completed_jobs, _batch_failed_jobs
+    logger.info("Convert worker %d started (encoder=%s)", worker_id, get_effective_encoder())
     while True:
         video_id = await _queue.get()
         if video_id == "__STOP__":
+            _queue.task_done()
             break
-        _current_video_id = video_id
+        _active[worker_id] = {"video_id": video_id, "proc": None}
         try:
-            await _convert_video(video_id)
+            await _convert_video(worker_id, video_id)
             _batch_completed_jobs += 1
         except Exception:
-            logger.exception("Convert failed for %s", video_id)
+            logger.exception("Convert failed for %s (worker %d)", video_id, worker_id)
             _update_status(video_id, "failed", 0.0)
             _batch_failed_jobs += 1
         finally:
-            _current_video_id = None
-            _current_proc = None
+            _active.pop(worker_id, None)
             _queue.task_done()
 
 
-async def _convert_video(video_id: str) -> None:
+async def _convert_video(worker_id: int, video_id: str) -> None:
     settings = get_settings()
     with SessionLocal() as session:
         video = session.get(Video, video_id)
@@ -310,7 +389,7 @@ async def _convert_video(video_id: str) -> None:
         duration = video.duration or 0
         codec = (video.codec or "").lower().strip()
 
-        if not needs_conversion(src):
+        if not needs_conversion(src, codec):
             # Source no longer needs conversion (e.g. compressed away). Mark skipped.
             video.convert_status = "skipped"
             video.convert_progress = 0.0
@@ -363,7 +442,7 @@ async def _convert_video(video_id: str) -> None:
         video_id, src.name, codec or "?", encoder_name, bool(hw_decode_args), out_path,
     )
 
-    returncode = await _run_ffmpeg_with_progress(build_cmd(hw_decode_args), duration, video_id)
+    returncode = await _run_ffmpeg_with_progress(worker_id, build_cmd(hw_decode_args), duration, video_id)
 
     # If HW decode failed (NVDEC may not support every WMV/VC-1 variant on Turing),
     # retry once on pure CPU decode. The encode path stays NVENC if available.
@@ -377,7 +456,7 @@ async def _convert_video(video_id: str) -> None:
                 out_path.unlink()
             except OSError:
                 pass
-        returncode = await _run_ffmpeg_with_progress(build_cmd([]), duration, video_id)
+        returncode = await _run_ffmpeg_with_progress(worker_id, build_cmd([]), duration, video_id)
 
     if returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
         logger.error("Conversion failed for %s (returncode=%s)", video_id, returncode)
@@ -418,20 +497,21 @@ async def _convert_video(video_id: str) -> None:
 
 
 async def _run_ffmpeg_with_progress(
-    cmd: list[str], duration: float, video_id: str
+    worker_id: int, cmd: list[str], duration: float, video_id: str
 ) -> int:
     """Run an ffmpeg command, parse `-progress pipe:2` output, push status updates.
 
     Returns the process return code. Used by the converter so we can retry the
     same logical job with different decode flags on failure.
     """
-    global _current_proc
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _current_proc = proc
+    slot = _active.get(worker_id)
+    if slot is not None:
+        slot["proc"] = proc
     try:
         while True:
             line = await proc.stderr.readline()
@@ -446,7 +526,9 @@ async def _run_ffmpeg_with_progress(
                 _update_status(video_id, "processing", round(pct, 1))
         await proc.wait()
     finally:
-        _current_proc = None
+        slot = _active.get(worker_id)
+        if slot is not None:
+            slot["proc"] = None
     return proc.returncode or 0
 
 
@@ -463,7 +545,7 @@ def _begin_tracking(new_jobs: int) -> None:
     global _batch_total_jobs, _batch_completed_jobs, _batch_failed_jobs
     if new_jobs <= 0:
         return
-    if _queue.qsize() == 0 and _current_video_id is None:
+    if _queue.qsize() == 0 and not _active:
         _batch_total_jobs = 0
         _batch_completed_jobs = 0
         _batch_failed_jobs = 0

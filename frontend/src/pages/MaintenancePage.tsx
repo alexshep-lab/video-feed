@@ -13,6 +13,12 @@ import {
   fetchConvertCandidates,
   fetchConvertStatus,
   fetchEncoderInfo,
+  fetchConvertedOriginals,
+  replaceConvertedOriginals,
+  ConvertedOriginal,
+  fetchCompressArchive,
+  purgeCompressArchive,
+  ArchiveItem,
   convertOne,
   convertAllPending,
   convertBatch,
@@ -149,6 +155,28 @@ export default function MaintenancePage() {
   const [convertPage, setConvertPage] = useState(0);
   const [convertSort, setConvertSort] = useState<ConvertSort>("h264_first");
   const [convertLoading, setConvertLoading] = useState(false);
+
+  // Replace-converted-originals (delete WMV/AVI after successful MP4 conversion,
+  // move MP4 into the library at the original path's location).
+  const [replaceItems, setReplaceItems] = useState<ConvertedOriginal[]>([]);
+  const [replaceReclaimable, setReplaceReclaimable] = useState(0);
+  const [replaceLoading, setReplaceLoading] = useState(false);
+  const [replaceRunning, setReplaceRunning] = useState(false);
+  const [replaceResult, setReplaceResult] = useState<string | null>(null);
+  const [showReplaceList, setShowReplaceList] = useState(false);
+
+  // Compress archive (big_archive_dir) — post-compression originals that can
+  // be recycled to actually free disk space on a single-drive setup.
+  const [archiveInfo, setArchiveInfo] = useState<{
+    path: string; exists: boolean; total_size: number; file_count: number;
+  } | null>(null);
+  const [archiveItems, setArchiveItems] = useState<ArchiveItem[]>([]);
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiveRunning, setArchiveRunning] = useState(false);
+  const [archiveResult, setArchiveResult] = useState<string | null>(null);
+  const [showArchiveList, setShowArchiveList] = useState(false);
+  const [archiveOlderDays, setArchiveOlderDays] = useState<string>("30");
+  const [archiveSelected, setArchiveSelected] = useState<Set<string>>(new Set());
 
   // Collapsible spoilers — start collapsed for big lists so the page loads light
   const [showDupResults, setShowDupResults] = useState(false);
@@ -375,6 +403,113 @@ export default function MaintenancePage() {
     if (!showConvertList) return;
     loadConvertCandidates(convertPage, convertSort);
   }, [showConvertList, convertPage, convertSort]);
+
+  async function loadReplaceCandidates() {
+    setReplaceLoading(true);
+    try {
+      const r = await fetchConvertedOriginals();
+      setReplaceItems(r.items);
+      setReplaceReclaimable(r.reclaimable_bytes);
+    } catch {
+      return null;
+    } finally {
+      setReplaceLoading(false);
+    }
+  }
+
+  async function handleReplaceOriginals() {
+    if (!confirm(`Move ${replaceItems.length} MP4s into library and Recycle-bin the ${replaceItems.length} WMV/AVI originals?`)) return;
+    setReplaceRunning(true);
+    setReplaceResult(null);
+    try {
+      const r = await replaceConvertedOriginals();
+      const parts = [`Replaced ${r.replaced}`];
+      if (r.skipped_collision) parts.push(`skipped ${r.skipped_collision} (target exists)`);
+      if (r.move_failed) parts.push(`move failed ${r.move_failed}`);
+      if (r.recycle_failed) parts.push(`recycle failed ${r.recycle_failed}`);
+      setReplaceResult(parts.join(", "));
+      await loadReplaceCandidates();
+    } catch (e) {
+      setReplaceResult(String(e));
+    } finally {
+      setReplaceRunning(false);
+    }
+  }
+
+  useEffect(() => {
+    if (showReplaceList) loadReplaceCandidates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showReplaceList]);
+
+  async function loadArchive() {
+    setArchiveLoading(true);
+    try {
+      const r = await fetchCompressArchive();
+      setArchiveInfo({
+        path: r.path,
+        exists: r.exists,
+        total_size: r.total_size,
+        file_count: r.file_count,
+      });
+      setArchiveItems(r.items);
+      setArchiveSelected(new Set());
+    } catch {
+      return null;
+    } finally {
+      setArchiveLoading(false);
+    }
+  }
+
+  function toggleArchiveSelected(path: string) {
+    setArchiveSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  }
+
+  async function handleArchivePurge(mode: "all" | "older" | "selected") {
+    if (!archiveInfo) return;
+    let body: { older_than_days?: number | null; paths?: string[] | null } = {};
+    let confirmMsg = "";
+
+    if (mode === "selected") {
+      if (archiveSelected.size === 0) return;
+      body = { paths: Array.from(archiveSelected) };
+      confirmMsg = `Переместить ${archiveSelected.size} выбранных файлов в Корзину?`;
+    } else if (mode === "older") {
+      const days = parseInt(archiveOlderDays, 10);
+      if (!Number.isFinite(days) || days < 0) return;
+      body = { older_than_days: days };
+      const count = archiveItems.filter((it) => it.age_days >= days).length;
+      const size = archiveItems
+        .filter((it) => it.age_days >= days)
+        .reduce((s, it) => s + it.size, 0);
+      confirmMsg = `Переместить в Корзину ${count} файлов старше ${days} дн. (${formatFileSize(size)})?`;
+    } else {
+      confirmMsg = `Переместить в Корзину ВСЕ ${archiveInfo.file_count} файлов архива (${formatFileSize(archiveInfo.total_size)})?`;
+    }
+
+    if (!confirm(confirmMsg)) return;
+    setArchiveRunning(true);
+    setArchiveResult(null);
+    try {
+      const r = await purgeCompressArchive(body);
+      const parts = [`Recycled ${r.recycled}`, `freed ${formatFileSize(r.total_bytes_freed)}`];
+      if (r.failed) parts.push(`failed ${r.failed}`);
+      setArchiveResult(parts.join(", "));
+      await loadArchive();
+    } catch (e) {
+      setArchiveResult(String(e));
+    } finally {
+      setArchiveRunning(false);
+    }
+  }
+
+  useEffect(() => {
+    if (showArchiveList) loadArchive();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchiveList]);
 
   // Auto-fetch compress candidates only when its spoiler is open. Initial counter
   // (used by status panel) is fetched separately on mount via the existing
@@ -766,7 +901,7 @@ export default function MaintenancePage() {
           )}
         </div>
 
-        <p className="text-xs text-white/40">Eligible right now: {compressCandidates} (rule: video height &gt; {minHeight})</p>
+        <p className="text-xs text-white/40">Eligible right now: {compressCandidates} (rule: shorter side &gt; {minHeight}px — orientation-aware)</p>
         {compressResult && <p className="text-xs text-white/40">{compressResult}</p>}
 
         <div className="space-y-3">
@@ -1083,6 +1218,168 @@ export default function MaintenancePage() {
             >
               Next &rarr;
             </button>
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
+      {/* Replace converted originals — delete WMV/AVI, move MP4 into library */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Replace Converted Originals</h2>
+        <p className="text-xs text-white/40">
+          Для видео, которые уже успешно сконвертированы в MP4: перенести
+          MP4 из <code className="text-white/60">converted/</code> на место
+          исходного WMV/AVI (с расширением <code className="text-white/60">.mp4</code>),
+          а оригинал отправить в Корзину. Строка в БД обновляется, а место
+          под <code className="text-white/60">.wmv/.avi</code> освобождается.
+        </p>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadReplaceCandidates} disabled={replaceLoading} className={btnCls}>
+            {replaceLoading ? "Scanning..." : "Refresh Candidates"}
+          </button>
+          <button
+            onClick={handleReplaceOriginals}
+            disabled={replaceRunning || replaceItems.length === 0}
+            className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {replaceRunning ? "Replacing..." : `Replace ${replaceItems.length} & Recycle`}
+          </button>
+          {replaceItems.length > 0 && (
+            <span className="text-xs text-white/50">
+              Reclaimable: {formatFileSize(replaceReclaimable)}
+            </span>
+          )}
+          {replaceResult && <span className="text-xs text-white/60">{replaceResult}</span>}
+        </div>
+
+        <SpoilerToggle
+          open={showReplaceList}
+          onClick={() => setShowReplaceList((v) => !v)}
+          label="candidate list"
+          count={replaceItems.length}
+        />
+
+        {showReplaceList && replaceItems.length === 0 && !replaceLoading && (
+          <p className="text-sm text-white/40">Нет кандидатов. Либо нет завершённых конверсий, либо MP4/оригинал уже отсутствуют на диске.</p>
+        )}
+        {showReplaceList && replaceItems.length > 0 && (
+          <div className="space-y-1.5 max-h-96 overflow-y-auto">
+            {replaceItems.map((v) => (
+              <div
+                key={v.id}
+                className="rounded-lg border border-white/10 bg-white/[0.03] p-2 text-xs"
+              >
+                <p className="truncate text-white/80">{v.title}</p>
+                <p className="truncate text-white/40">{v.original_path}</p>
+                <p className="text-white/30">{formatFileSize(v.original_size)}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
+      {/* Compress archive — post-compression originals in big_archive_dir */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Compress Archive</h2>
+        <p className="text-xs text-white/40">
+          После сжатия оригинал перемещается в <code className="text-white/60">big_archive_dir</code>
+          (по умолчанию <code className="text-white/60">L:\Prvt\big</code>). Если архив на том же диске,
+          что и библиотека, место не освобождается. Здесь можно отправить оригиналы в Корзину,
+          когда сжатые копии проверены и устраивают.
+        </p>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadArchive} disabled={archiveLoading} className={btnCls}>
+            {archiveLoading ? "Scanning..." : "Refresh Archive"}
+          </button>
+          {archiveInfo && (
+            <span className="text-xs text-white/60">
+              <code className="text-white/40">{archiveInfo.path}</code>
+              {" — "}
+              {archiveInfo.exists
+                ? `${archiveInfo.file_count} files, ${formatFileSize(archiveInfo.total_size)}`
+                : "папки нет"}
+            </span>
+          )}
+          {archiveResult && <span className="text-xs text-white/60">{archiveResult}</span>}
+        </div>
+
+        {archiveInfo?.exists && archiveInfo.file_count > 0 && (
+          <div className="flex items-center gap-3 flex-wrap text-sm">
+            <label className="flex items-center gap-2 text-xs text-white/50">
+              Older than
+              <input
+                type="number"
+                min={0}
+                value={archiveOlderDays}
+                onChange={(e) => setArchiveOlderDays(e.target.value)}
+                className="w-16 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-white/80"
+              />
+              days
+            </label>
+            <button
+              onClick={() => handleArchivePurge("older")}
+              disabled={archiveRunning}
+              className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Recycle older than {archiveOlderDays}d
+            </button>
+            <button
+              onClick={() => handleArchivePurge("selected")}
+              disabled={archiveRunning || archiveSelected.size === 0}
+              className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Recycle {archiveSelected.size} selected
+            </button>
+            <button
+              onClick={() => handleArchivePurge("all")}
+              disabled={archiveRunning}
+              className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {archiveRunning ? "Recycling..." : `Recycle ALL (${formatFileSize(archiveInfo.total_size)})`}
+            </button>
+          </div>
+        )}
+
+        <SpoilerToggle
+          open={showArchiveList}
+          onClick={() => setShowArchiveList((v) => !v)}
+          label="archive file list"
+          count={archiveInfo?.file_count ?? null}
+        />
+
+        {showArchiveList && archiveInfo && !archiveInfo.exists && (
+          <p className="text-sm text-white/40">Папки архива не существует — компрессия ещё не запускалась.</p>
+        )}
+        {showArchiveList && archiveInfo?.exists && archiveInfo.file_count === 0 && !archiveLoading && (
+          <p className="text-sm text-white/40">Архив пуст.</p>
+        )}
+        {showArchiveList && archiveItems.length > 0 && (
+          <div className="space-y-1.5 max-h-96 overflow-y-auto">
+            {archiveItems.map((it) => (
+              <label
+                key={it.path}
+                className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] p-2 text-xs cursor-pointer hover:bg-white/[0.06]"
+              >
+                <input
+                  type="checkbox"
+                  checked={archiveSelected.has(it.path)}
+                  onChange={() => toggleArchiveSelected(it.path)}
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-white/80">{it.name}</p>
+                  <p className="truncate text-white/40">{it.path}</p>
+                </div>
+                <div className="text-right text-white/30 shrink-0">
+                  <p>{formatFileSize(it.size)}</p>
+                  <p>{it.age_days}d old</p>
+                </div>
+              </label>
+            ))}
           </div>
         )}
       </section>

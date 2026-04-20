@@ -13,6 +13,8 @@ from ..services.compressor import (
     enqueue_oversized,
     get_oversized_candidates,
     get_compress_status,
+    list_archive,
+    purge_archive,
     start_compress_worker,
     stop_compress_all,
 )
@@ -177,6 +179,42 @@ def compress_stop() -> dict:
     return stop_compress_all()
 
 
+# ---- Archived originals (space reclamation after compress) ----
+#
+# After compression the source is moved to ``big_archive_dir`` for safety. On
+# a single-drive setup this frees no space — these endpoints let the user
+# inspect and recycle-bin those archived originals once the FHD copies have
+# been validated.
+
+@router.get("/compress/archive")
+def compress_archive_list() -> dict:
+    """Files currently sitting in ``big_archive_dir`` (oldest first)."""
+    from ..config import get_settings
+    return list_archive(get_settings().big_archive_dir)
+
+
+@router.post("/compress/archive/purge")
+def compress_archive_purge(
+    older_than_days: int | None = Body(default=None),
+    paths: list[str] | None = Body(default=None),
+) -> dict:
+    """Recycle-bin archived originals.
+
+    Body semantics:
+      - ``paths`` — explicit list of absolute paths to recycle. Entries outside
+        ``big_archive_dir`` are silently rejected (defense in depth).
+      - ``older_than_days`` — applied only when ``paths`` is empty/null; every
+        file older than the cutoff is recycled.
+      - Both null → purge the entire archive.
+    """
+    from ..config import get_settings
+    return purge_archive(
+        get_settings().big_archive_dir,
+        older_than_days=older_than_days,
+        paths=paths,
+    )
+
+
 # ---- Browser-friendly conversion (e.g. WMV -> MP4) ----
 
 @router.get("/convert/status")
@@ -248,7 +286,7 @@ def convert_batch(
         if not video:
             skipped.append({"id": vid, "reason": "not_found"})
             continue
-        if not needs_conversion(video.original_path):
+        if not needs_conversion(video.original_path, video.codec):
             skipped.append({"id": vid, "reason": "not_applicable"})
             continue
         if video.convert_status == "completed":
@@ -270,7 +308,7 @@ def convert_one(video_id: str, db: Session = Depends(get_db)) -> dict:
     video = db.get(Video, video_id)
     if not video:
         return {"status": "not_found"}
-    if not needs_conversion(video.original_path):
+    if not needs_conversion(video.original_path, video.codec):
         return {"status": "not_applicable", "reason": "source already browser-friendly"}
     video.convert_status = "pending"
     video.convert_progress = 0.0
@@ -634,6 +672,140 @@ def purge_short_videos(
         "purged_no_file": purged_no_file,
         "max_seconds": max_seconds,
         "errors": errors[:20],
+    }
+
+
+# ---- Replace converted originals (move MP4 into library, Recycle WMV/AVI) ----
+
+@router.get("/converted-originals")
+def list_converted_originals(db: Session = Depends(get_db)) -> dict:
+    """Active rows where a converted MP4 exists and the original is a WMV/AVI.
+
+    These are candidates for ``POST .../replace``: moving the MP4 into the
+    library folder (as ``<stem>.mp4``), Recycle-binning the WMV/AVI, and
+    flattening the row so ``original_path`` points at the in-library MP4.
+    """
+    import os
+    from ..models import Video as _V
+    rows = db.scalars(
+        select(_V).where(
+            _V.deleted_at.is_(None),
+            _V.convert_status == "completed",
+            _V.converted_path.is_not(None),
+        )
+    ).all()
+    items: list[dict] = []
+    total_reclaimable = 0
+    for v in rows:
+        if not v.original_path or not v.converted_path:
+            continue
+        try:
+            orig_exists = os.path.exists(v.original_path)
+            conv_exists = os.path.exists(v.converted_path)
+        except Exception:
+            continue
+        if not (orig_exists and conv_exists):
+            continue
+        if not needs_conversion(v.original_path, v.codec):
+            continue
+        try:
+            orig_size = os.path.getsize(v.original_path)
+        except OSError:
+            orig_size = v.file_size or 0
+        total_reclaimable += orig_size
+        items.append({
+            "id": v.id,
+            "title": v.title,
+            "original_path": v.original_path,
+            "original_size": orig_size,
+            "converted_path": v.converted_path,
+        })
+    return {"count": len(items), "reclaimable_bytes": total_reclaimable, "items": items}
+
+
+@router.post("/converted-originals/replace")
+def replace_converted_originals(db: Session = Depends(get_db)) -> dict:
+    """Move the converted MP4 into the library next to the original, then
+    Recycle-bin the WMV/AVI. Row becomes a normal MP4 row.
+
+    Order is chosen to fail safe: move first (if it fails we've changed
+    nothing), only delete the original after the move completes.
+    """
+    import os
+    import shutil
+    from pathlib import Path as _P
+    from ..models import Video as _V
+    from ..services.fileops import move_to_recycle_bin
+
+    rows = db.scalars(
+        select(_V).where(
+            _V.deleted_at.is_(None),
+            _V.convert_status == "completed",
+            _V.converted_path.is_not(None),
+        )
+    ).all()
+
+    replaced = 0
+    skipped_collision = 0
+    move_failed = 0
+    recycle_failed = 0
+    errors: list[dict] = []
+
+    for v in rows:
+        if not v.original_path or not v.converted_path:
+            continue
+        orig = _P(v.original_path)
+        conv = _P(v.converted_path)
+        if not orig.exists() or not conv.exists():
+            continue
+        if not needs_conversion(orig, v.codec):
+            continue
+
+        target = orig.with_suffix(".mp4")
+        # If an `.mp4` with the same stem already exists next to the source
+        # (pre-existing transcode, or stem collision with an unrelated file),
+        # skip to avoid stomping on it.
+        if target.exists() and target.resolve() != conv.resolve():
+            skipped_collision += 1
+            errors.append({"id": v.id, "reason": "target_exists", "target": str(target)})
+            continue
+
+        try:
+            shutil.move(str(conv), str(target))
+        except Exception as e:
+            move_failed += 1
+            errors.append({"id": v.id, "reason": "move_failed", "error": str(e)})
+            continue
+
+        # Move done. Now Recycle the original — if this fails we don't roll back
+        # the move (the MP4 is the real content we want to keep). Log and move on.
+        try:
+            move_to_recycle_bin(orig)
+        except Exception as e:
+            recycle_failed += 1
+            errors.append({"id": v.id, "reason": "recycle_failed", "error": str(e)})
+
+        try:
+            new_size = target.stat().st_size
+        except OSError:
+            new_size = v.file_size or 0
+
+        v.original_path = str(target)
+        v.original_filename = target.name
+        v.file_size = new_size
+        v.codec = "h264"
+        v.convert_status = "skipped"
+        v.convert_progress = 0.0
+        v.converted_path = None
+        replaced += 1
+
+    db.commit()
+    return {
+        "replaced": replaced,
+        "skipped_collision": skipped_collision,
+        "move_failed": move_failed,
+        "recycle_failed": recycle_failed,
+        "errors": errors[:30],
     }
 
 
