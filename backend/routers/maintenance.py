@@ -809,6 +809,73 @@ def replace_converted_originals(db: Session = Depends(get_db)) -> dict:
     }
 
 
+# ---- Screenshot / pack folder cleanup (physical delete) ----
+
+@router.get("/library/screen-folders")
+def list_screen_folders(db: Session = Depends(get_db)) -> dict:
+    """Scan library roots for screenshot-pack folders (Screens, *_scr, etc.).
+
+    Returns paths, sizes, and file counts sorted biggest first. These folders
+    are never read by the app — they're leftover from how the library was
+    originally downloaded.
+    """
+    from pathlib import Path as _P
+    from ..models import LibraryFolder
+    from ..services.screen_cleanup import find_screenshot_folders
+
+    roots = [
+        _P(f.path)
+        for f in db.scalars(
+            select(LibraryFolder).where(LibraryFolder.enabled == True)  # noqa: E712
+        ).all()
+    ]
+    return find_screenshot_folders(roots)
+
+
+@router.post("/library/screen-folders/purge")
+def purge_screen_folders(
+    paths: list[str] = Body(default=None, embed=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Recycle-bin the given screenshot folders. Paths outside any registered
+    library root are silently rejected (defense in depth)."""
+    from pathlib import Path as _P
+    from ..models import LibraryFolder
+    from ..services.screen_cleanup import purge_screenshot_folders
+
+    roots = [
+        _P(f.path)
+        for f in db.scalars(
+            select(LibraryFolder).where(LibraryFolder.enabled == True)  # noqa: E712
+        ).all()
+    ]
+    return purge_screenshot_folders(paths or [], roots)
+
+
+# ---- Tag normalization (folder-tag cleanup) ----
+
+@router.get("/tags/normalize-preview")
+def tags_normalize_preview(db: Session = Depends(get_db)) -> dict:
+    """Dry-run: show what tag rename/merge/delete the normalizer would do.
+
+    Read-only — use this to review before calling ``POST .../normalize``.
+    """
+    from ..services.tag_normalize import plan_tag_normalization
+    return plan_tag_normalization(db)
+
+
+@router.post("/tags/normalize")
+def tags_normalize_apply(db: Session = Depends(get_db)) -> dict:
+    """Apply the normalization plan: rename tags, merge equivalents,
+    delete service-folder tags (screens, incoming, ...).
+
+    All changes run in a single transaction. The scanner already uses
+    the same normalizer on write, so subsequent scans stay idempotent.
+    """
+    from ..services.tag_normalize import apply_tag_normalization
+    return apply_tag_normalization(db)
+
+
 # ---- Encoder info ----
 
 @router.get("/encoder")

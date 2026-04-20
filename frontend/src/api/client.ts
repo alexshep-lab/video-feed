@@ -401,6 +401,66 @@ export async function purgeCompressArchive(body: {
   return r.json();
 }
 
+// ---- Tag normalization ----
+
+export type TagNormalizePlan = {
+  dry_run: boolean;
+  total_tags_before: number;
+  total_tags_after: number;
+  deletes: { name: string; videos: number }[];
+  merges: { canonical: string; sources: string[]; videos_affected: number }[];
+  renames: { from: string; to: string; videos: number }[];
+};
+
+export async function fetchTagNormalizePreview(): Promise<TagNormalizePlan> {
+  const r = await fetch(`${API_BASE}/maintenance/tags/normalize-preview`);
+  return r.json();
+}
+
+export async function applyTagNormalize(): Promise<{
+  dry_run: boolean;
+  renamed: number;
+  merged_tags: number;
+  links_remapped: number;
+  deleted_tags: number;
+  links_dropped: number;
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/tags/normalize`, { method: "POST" });
+  return r.json();
+}
+
+// ---- Screenshot / pack folder cleanup ----
+
+export type ScreenFolderItem = {
+  path: string;
+  name: string;
+  size: number;
+  file_count: number;
+};
+
+export async function fetchScreenFolders(): Promise<{
+  count: number;
+  total_size: number;
+  items: ScreenFolderItem[];
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/library/screen-folders`);
+  return r.json();
+}
+
+export async function purgeScreenFolders(paths: string[]): Promise<{
+  recycled: number;
+  failed: number;
+  total_bytes_freed: number;
+  errors: { path: string; error: string }[];
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/library/screen-folders/purge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths }),
+  });
+  return r.json();
+}
+
 // ---- Video palette (contact sheet) batch generation ----
 
 export type PaletteStatus = {

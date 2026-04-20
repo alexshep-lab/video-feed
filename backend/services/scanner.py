@@ -12,6 +12,7 @@ from ..config import get_settings
 from ..models import LibraryFolder, Tag, Video
 from .converter import enqueue_convert, needs_conversion, start_convert_worker
 from .metadata import SUPPORTED_EXTENSIONS, extract_video_metadata
+from .tag_normalize import normalize_tag_name
 from .thumbnail import generate_thumbnail
 
 
@@ -404,9 +405,11 @@ def _apply_folder_tags(
     for lib_resolved in all_library_dirs_resolved.values():
         try:
             file_resolved.relative_to(lib_resolved)
-            # This folder is an ancestor — add its name as a tag
-            name = lib_resolved.name.lower().strip()
-            name = sanitize_text(name) or ""
+            # This folder is an ancestor — add its name as a tag. Normalizer
+            # strips count/site suffixes and rejects service folders
+            # (`screens`, `incoming`, ...), so `None` means "don't tag".
+            name = normalize_tag_name(lib_resolved.name)
+            name = sanitize_text(name) if name else None
             if name and name not in seen:
                 folder_names.append(name)
                 seen.add(name)
@@ -417,8 +420,8 @@ def _apply_folder_tags(
     try:
         relative = file_resolved.relative_to(library_dir_resolved)
         for part in relative.parts[:-1]:  # Exclude filename
-            name = part.lower().strip()
-            name = sanitize_text(name) or ""
+            name = normalize_tag_name(part)
+            name = sanitize_text(name) if name else None
             if name and name not in seen:
                 folder_names.append(name)
                 seen.add(name)

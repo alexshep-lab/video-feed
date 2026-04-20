@@ -19,6 +19,12 @@ import {
   fetchCompressArchive,
   purgeCompressArchive,
   ArchiveItem,
+  fetchTagNormalizePreview,
+  applyTagNormalize,
+  TagNormalizePlan,
+  fetchScreenFolders,
+  purgeScreenFolders,
+  ScreenFolderItem,
   convertOne,
   convertAllPending,
   convertBatch,
@@ -177,6 +183,22 @@ export default function MaintenancePage() {
   const [showArchiveList, setShowArchiveList] = useState(false);
   const [archiveOlderDays, setArchiveOlderDays] = useState<string>("30");
   const [archiveSelected, setArchiveSelected] = useState<Set<string>>(new Set());
+
+  // Tag normalizer — fold count/site suffixes, drop service folders.
+  const [tagPlan, setTagPlan] = useState<TagNormalizePlan | null>(null);
+  const [tagPlanLoading, setTagPlanLoading] = useState(false);
+  const [tagApplying, setTagApplying] = useState(false);
+  const [tagResult, setTagResult] = useState<string | null>(null);
+  const [showTagPlan, setShowTagPlan] = useState(false);
+
+  // Screenshot / pack folder cleanup (physical delete in library roots).
+  const [screenFolders, setScreenFolders] = useState<ScreenFolderItem[]>([]);
+  const [screenTotalSize, setScreenTotalSize] = useState(0);
+  const [screenLoading, setScreenLoading] = useState(false);
+  const [screenRunning, setScreenRunning] = useState(false);
+  const [screenResult, setScreenResult] = useState<string | null>(null);
+  const [screenSelected, setScreenSelected] = useState<Set<string>>(new Set());
+  const [showScreenList, setShowScreenList] = useState(false);
 
   // Collapsible spoilers — start collapsed for big lists so the page loads light
   const [showDupResults, setShowDupResults] = useState(false);
@@ -510,6 +532,92 @@ export default function MaintenancePage() {
     if (showArchiveList) loadArchive();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showArchiveList]);
+
+  async function loadTagPlan() {
+    setTagPlanLoading(true);
+    try {
+      const p = await fetchTagNormalizePreview();
+      setTagPlan(p);
+    } catch (e) {
+      setTagResult(String(e));
+    } finally {
+      setTagPlanLoading(false);
+    }
+  }
+
+  async function loadScreenFolders() {
+    setScreenLoading(true);
+    try {
+      const r = await fetchScreenFolders();
+      setScreenFolders(r.items);
+      setScreenTotalSize(r.total_size);
+      // Select everything by default — that's the common case ("nuke all").
+      setScreenSelected(new Set(r.items.map((it) => it.path)));
+    } catch (e) {
+      setScreenResult(String(e));
+    } finally {
+      setScreenLoading(false);
+    }
+  }
+
+  function toggleScreenSelected(path: string) {
+    setScreenSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  }
+
+  async function handleScreenPurge() {
+    if (screenSelected.size === 0) return;
+    const selectedSize = screenFolders
+      .filter((it) => screenSelected.has(it.path))
+      .reduce((s, it) => s + it.size, 0);
+    if (!confirm(
+      `Переместить в Корзину ${screenSelected.size} папок (${formatFileSize(selectedSize)})?\n\n` +
+      `Это папки Screens/, _SCREENSHOTS/, *_scr/ — приложение их не использует.`
+    )) return;
+    setScreenRunning(true);
+    setScreenResult(null);
+    try {
+      const r = await purgeScreenFolders(Array.from(screenSelected));
+      const parts = [`Recycled ${r.recycled}`, `freed ${formatFileSize(r.total_bytes_freed)}`];
+      if (r.failed) parts.push(`failed ${r.failed}`);
+      setScreenResult(parts.join(", "));
+      await loadScreenFolders();
+    } catch (e) {
+      setScreenResult(String(e));
+    } finally {
+      setScreenRunning(false);
+    }
+  }
+
+  async function handleTagApply() {
+    if (!tagPlan) return;
+    const totalChanges = tagPlan.deletes.length + tagPlan.merges.length + tagPlan.renames.length;
+    if (totalChanges === 0) {
+      setTagResult("Ничего менять не нужно — все теги уже нормализованы.");
+      return;
+    }
+    if (!confirm(
+      `Применить:\n  • Rename ${tagPlan.renames.length}\n  • Merge ${tagPlan.merges.length}\n  • Delete ${tagPlan.deletes.length}\n\n` +
+      `Итого тегов: ${tagPlan.total_tags_before} → ${tagPlan.total_tags_after}. Продолжить?`
+    )) return;
+    setTagApplying(true);
+    setTagResult(null);
+    try {
+      const r = await applyTagNormalize();
+      setTagResult(
+        `Renamed ${r.renamed}, merged ${r.merged_tags} (remapped ${r.links_remapped} links), ` +
+        `deleted ${r.deleted_tags} (dropped ${r.links_dropped} links)`
+      );
+      await loadTagPlan();
+    } catch (e) {
+      setTagResult(String(e));
+    } finally {
+      setTagApplying(false);
+    }
+  }
 
   // Auto-fetch compress candidates only when its spoiler is open. Initial counter
   // (used by status panel) is fetched separately on mount via the existing
@@ -1380,6 +1488,188 @@ export default function MaintenancePage() {
                 </div>
               </label>
             ))}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
+      {/* Screenshot / pack folder cleanup — physical delete from disk */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Screenshot / Pack Folders</h2>
+        <p className="text-xs text-white/40">
+          Папки <code className="text-white/60">Screens/</code>,{" "}
+          <code className="text-white/60">_SCREENSHOTS/</code>,{" "}
+          <code className="text-white/60">*_scr/</code>,{" "}
+          <code className="text-white/60">*Pack_scr/</code> внутри библиотеки. Приложением не
+          используются — это остаток от того, как контент скачивался. Папки уходят в Корзину
+          вместе со всем содержимым, можно откатить через Windows до её очистки.
+        </p>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadScreenFolders} disabled={screenLoading} className={btnCls}>
+            {screenLoading ? "Scanning..." : "Find Screen Folders"}
+          </button>
+          {screenFolders.length > 0 && (
+            <>
+              <button
+                onClick={handleScreenPurge}
+                disabled={screenRunning || screenSelected.size === 0}
+                className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {screenRunning
+                  ? "Recycling..."
+                  : `Recycle ${screenSelected.size} selected`}
+              </button>
+              <span className="text-xs text-white/60">
+                Found {screenFolders.length} folders, total {formatFileSize(screenTotalSize)}
+              </span>
+            </>
+          )}
+          {screenResult && <span className="text-xs text-white/60">{screenResult}</span>}
+        </div>
+
+        <SpoilerToggle
+          open={showScreenList}
+          onClick={() => setShowScreenList((v) => !v)}
+          label="folder list"
+          count={screenFolders.length}
+        />
+
+        {showScreenList && screenFolders.length === 0 && !screenLoading && (
+          <p className="text-sm text-white/40">
+            Запусти "Find Screen Folders". Если ничего не найдено — чисто.
+          </p>
+        )}
+        {showScreenList && screenFolders.length > 0 && (
+          <div className="space-y-1.5 max-h-[32rem] overflow-y-auto">
+            {screenFolders.map((it) => (
+              <label
+                key={it.path}
+                className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] p-2 text-xs cursor-pointer hover:bg-white/[0.06]"
+              >
+                <input
+                  type="checkbox"
+                  checked={screenSelected.has(it.path)}
+                  onChange={() => toggleScreenSelected(it.path)}
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-white/80">{it.name}</p>
+                  <p className="truncate text-white/40">{it.path}</p>
+                </div>
+                <div className="text-right text-white/30 shrink-0">
+                  <p>{formatFileSize(it.size)}</p>
+                  <p>{it.file_count} files</p>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
+      {/* Tag normalizer — fold count/site suffixes, drop service folders */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Tag Normalizer</h2>
+        <p className="text-xs text-white/40">
+          Свести теги, построенные из имён папок, к каноничному виду: убрать
+          <code className="text-white/60"> (66)</code>, <code className="text-white/60">.com</code>,
+          <code className="text-white/60"> _scr</code>, <code className="text-white/60">Pack_scr</code>
+          , схлопнуть эквиваленты (<code className="text-white/60">GuysForMatures</code>,{" "}
+          <code className="text-white/60">GuysForMatures.com</code>,{" "}
+          <code className="text-white/60">GuysForMatures (140)</code> → один тег), удалить
+          служебные (<code className="text-white/60">screens</code>,{" "}
+          <code className="text-white/60">incoming</code>, <code className="text-white/60">squized</code>, ...).
+          Сначала смотрим план — потом применяем.
+        </p>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadTagPlan} disabled={tagPlanLoading} className={btnCls}>
+            {tagPlanLoading ? "Computing..." : "Preview Plan"}
+          </button>
+          {tagPlan && (
+            <button
+              onClick={handleTagApply}
+              disabled={tagApplying}
+              className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {tagApplying ? "Applying..." : "Apply Normalization"}
+            </button>
+          )}
+          {tagPlan && (
+            <span className="text-xs text-white/60">
+              {tagPlan.total_tags_before} → {tagPlan.total_tags_after} tags
+              {" ("}
+              rename {tagPlan.renames.length}, merge {tagPlan.merges.length},
+              delete {tagPlan.deletes.length}
+              {")"}
+            </span>
+          )}
+          {tagResult && <span className="text-xs text-white/60">{tagResult}</span>}
+        </div>
+
+        <SpoilerToggle
+          open={showTagPlan}
+          onClick={() => setShowTagPlan((v) => !v)}
+          label="plan details"
+          count={tagPlan ? tagPlan.deletes.length + tagPlan.merges.length + tagPlan.renames.length : null}
+        />
+
+        {showTagPlan && tagPlan && (
+          <div className="space-y-4 text-xs">
+            {tagPlan.merges.length > 0 && (
+              <div>
+                <h3 className="text-sm text-white/70 mb-1">Merges ({tagPlan.merges.length})</h3>
+                <div className="space-y-1 max-h-64 overflow-y-auto">
+                  {tagPlan.merges.map((m) => (
+                    <div key={m.canonical} className="rounded border border-white/10 bg-white/[0.03] p-2">
+                      <p className="text-white/80">
+                        <span className="text-amber-300">{m.canonical}</span>
+                        {" ← "}
+                        <span className="text-white/60">{m.sources.join(", ")}</span>
+                      </p>
+                      <p className="text-white/40">{m.videos_affected} videos affected</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {tagPlan.renames.length > 0 && (
+              <div>
+                <h3 className="text-sm text-white/70 mb-1">Renames ({tagPlan.renames.length})</h3>
+                <div className="space-y-1 max-h-64 overflow-y-auto">
+                  {tagPlan.renames.map((r) => (
+                    <div key={r.from} className="rounded border border-white/10 bg-white/[0.03] p-2">
+                      <p className="text-white/80">
+                        <span className="text-white/50 line-through">{r.from}</span>
+                        {" → "}
+                        <span className="text-green-300">{r.to}</span>
+                        <span className="text-white/30 ml-2">({r.videos} videos)</span>
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {tagPlan.deletes.length > 0 && (
+              <div>
+                <h3 className="text-sm text-white/70 mb-1">Deletes ({tagPlan.deletes.length})</h3>
+                <div className="space-y-1 max-h-64 overflow-y-auto">
+                  {tagPlan.deletes.map((d) => (
+                    <div key={d.name} className="rounded border border-white/10 bg-white/[0.03] p-2">
+                      <p className="text-white/80">
+                        <span className="text-red-300 line-through">{d.name}</span>
+                        <span className="text-white/30 ml-2">({d.videos} videos lose this tag)</span>
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {tagPlan.merges.length === 0 && tagPlan.renames.length === 0 && tagPlan.deletes.length === 0 && (
+              <p className="text-sm text-white/40">План пуст — теги уже нормализованы.</p>
+            )}
           </div>
         )}
       </section>
