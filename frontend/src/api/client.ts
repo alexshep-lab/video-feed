@@ -461,6 +461,71 @@ export async function purgeScreenFolders(paths: string[]): Promise<{
   return r.json();
 }
 
+// ---- Tag dedup (similar clusters + manual merge) ----
+
+export type TagClusterMember = { id: number; name: string; videos: number };
+export type TagCluster = {
+  kind: "fingerprint" | "fuzzy";
+  suggested_canonical: string;
+  total_videos: number;
+  members: TagClusterMember[];
+};
+
+export async function fetchSimilarTags(): Promise<{
+  fingerprint_clusters: TagCluster[];
+  fuzzy_clusters: TagCluster[];
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/tags/similar`);
+  return r.json();
+}
+
+export async function mergeTags(canonical: string, sources: string[]): Promise<{
+  merged: number;
+  links_remapped: number;
+  canonical: string;
+  created: boolean;
+  error?: string;
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/tags/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ canonical, sources }),
+  });
+  return r.json();
+}
+
+// ---- Tag extraction from filenames ----
+
+export type ExtractPreview = {
+  total_tags: number;
+  total_additions: number;
+  videos_touched: number;
+  proposed_tags: {
+    tag: string;
+    videos: number;
+    sample_videos: { id: string; title: string; filename: string }[];
+  }[];
+};
+
+export async function fetchExtractPreview(): Promise<ExtractPreview> {
+  const r = await fetch(`${API_BASE}/maintenance/tags/extract-preview`);
+  return r.json();
+}
+
+export async function applyTagExtract(tagWhitelist: string[] | null): Promise<{
+  applied: number;
+  tags_created: number;
+  tags_reused: number;
+  videos_touched: number;
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/tags/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag_whitelist: tagWhitelist }),
+  });
+  return r.json();
+}
+
 // ---- Video palette (contact sheet) batch generation ----
 
 export type PaletteStatus = {

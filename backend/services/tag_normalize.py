@@ -196,6 +196,38 @@ def plan_tag_normalization(session: Session) -> dict:
     }
 
 
+def merge_tag_rows(session: Session, src: Tag, canonical: Tag) -> int:
+    """Redirect every ``video_tags`` row from ``src.id`` to ``canonical.id``.
+
+    ``INSERT OR IGNORE`` collapses rows that would collide with an existing
+    ``(video_id, canonical_id)`` pair. Returns the number of source links
+    redirected (pre-merge count). Does NOT commit — callers compose larger
+    transactions.
+    """
+    link_count = session.scalar(
+        select(func.count()).where(video_tags.c.tag_id == src.id)
+    ) or 0
+    insert_stmt = video_tags.insert().prefix_with("OR IGNORE").from_select(
+        ["video_id", "tag_id"],
+        select(video_tags.c.video_id, literal(canonical.id))
+        .where(video_tags.c.tag_id == src.id),
+    )
+    session.execute(insert_stmt)
+    session.execute(delete(video_tags).where(video_tags.c.tag_id == src.id))
+    session.delete(src)
+    return link_count
+
+
+def delete_tag_with_links(session: Session, tag: Tag) -> int:
+    """Drop a Tag and every video_tags row referring to it. Returns link count."""
+    link_count = session.scalar(
+        select(func.count()).where(video_tags.c.tag_id == tag.id)
+    ) or 0
+    session.execute(delete(video_tags).where(video_tags.c.tag_id == tag.id))
+    session.delete(tag)
+    return link_count
+
+
 def apply_tag_normalization(session: Session) -> dict:
     """Actually perform the rename/merge/delete plan.
 
@@ -212,49 +244,23 @@ def apply_tag_normalization(session: Session) -> dict:
     merged_tags = 0
     remapped_links = 0
 
-    # 1) Merge / rename every non-None group.
-    #
-    # For multi-tag groups we pick a canonical row (prefer the one whose name
-    # already matches the normalized form — if none match, the first by id).
-    # All `video_tags` rows pointing at sources get redirected to canonical
-    # via `INSERT OR IGNORE` (so duplicates collapse) then the source rows
-    # are deleted. Finally the canonical row's name is set to the normalized
-    # form.
+    # 1) Merge / rename every non-None group. For multi-tag groups pick a
+    # canonical row (prefer one whose name already matches the normalized
+    # form, else the lowest id). All video_tags rows on the losers get
+    # redirected; losers are deleted; canonical gets renamed to `norm`.
     for norm, tags in groups.items():
         tags_sorted = sorted(tags, key=lambda t: (t.name != norm, t.id))
         canonical = tags_sorted[0]
-        sources = tags_sorted[1:]
-
-        for src in sources:
-            # Count source links BEFORE remapping — INSERT OR IGNORE won't
-            # tell us how many rows were actually written.
-            src_link_count = session.scalar(
-                select(func.count()).where(video_tags.c.tag_id == src.id)
-            ) or 0
-            remapped_links += src_link_count
-
-            insert_stmt = video_tags.insert().prefix_with("OR IGNORE").from_select(
-                ["video_id", "tag_id"],
-                select(video_tags.c.video_id, literal(canonical.id))
-                .where(video_tags.c.tag_id == src.id),
-            )
-            session.execute(insert_stmt)
-            session.execute(delete(video_tags).where(video_tags.c.tag_id == src.id))
-            session.delete(src)
+        for src in tags_sorted[1:]:
+            remapped_links += merge_tag_rows(session, src, canonical)
             merged_tags += 1
-
         if canonical.name != norm:
             canonical.name = norm
             renamed += 1
 
     # 2) Drop service-folder tags entirely (screens, incoming, ...).
     for tag in to_delete:
-        link_count = session.scalar(
-            select(func.count()).where(video_tags.c.tag_id == tag.id)
-        ) or 0
-        deleted_links += link_count
-        session.execute(delete(video_tags).where(video_tags.c.tag_id == tag.id))
-        session.delete(tag)
+        deleted_links += delete_tag_with_links(session, tag)
         deleted += 1
 
     session.commit()

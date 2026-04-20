@@ -25,6 +25,12 @@ import {
   fetchScreenFolders,
   purgeScreenFolders,
   ScreenFolderItem,
+  fetchSimilarTags,
+  mergeTags,
+  TagCluster,
+  fetchExtractPreview,
+  applyTagExtract,
+  ExtractPreview,
   convertOne,
   convertAllPending,
   convertBatch,
@@ -190,6 +196,23 @@ export default function MaintenancePage() {
   const [tagApplying, setTagApplying] = useState(false);
   const [tagResult, setTagResult] = useState<string | null>(null);
   const [showTagPlan, setShowTagPlan] = useState(false);
+
+  // Tag dedup — similar / fuzzy clusters + manual merge controls.
+  const [fingerprintClusters, setFingerprintClusters] = useState<TagCluster[]>([]);
+  const [fuzzyClusters, setFuzzyClusters] = useState<TagCluster[]>([]);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [similarResult, setSimilarResult] = useState<string | null>(null);
+  const [showSimilar, setShowSimilar] = useState(false);
+  // Per-cluster UI state: canonical name (editable), set of source names to include.
+  const [clusterState, setClusterState] = useState<Record<string, { canonical: string; include: Set<string> }>>({});
+
+  // Tag extraction from filenames.
+  const [extractPreview, setExtractPreview] = useState<ExtractPreview | null>(null);
+  const [extractLoading, setExtractLoading] = useState(false);
+  const [extractApplying, setExtractApplying] = useState(false);
+  const [extractResult, setExtractResult] = useState<string | null>(null);
+  const [extractUnchecked, setExtractUnchecked] = useState<Set<string>>(new Set());
+  const [showExtractList, setShowExtractList] = useState(false);
 
   // Screenshot / pack folder cleanup (physical delete in library roots).
   const [screenFolders, setScreenFolders] = useState<ScreenFolderItem[]>([]);
@@ -542,6 +565,128 @@ export default function MaintenancePage() {
       setTagResult(String(e));
     } finally {
       setTagPlanLoading(false);
+    }
+  }
+
+  function clusterKey(c: TagCluster): string {
+    // Stable key for state lookup — a fingerprint cluster's members are
+    // identical modulo spacing, so joining sorted member names is safe.
+    return c.kind + ":" + c.members.map((m) => m.name).sort().join("|");
+  }
+
+  async function loadSimilarTags() {
+    setSimilarLoading(true);
+    try {
+      const r = await fetchSimilarTags();
+      setFingerprintClusters(r.fingerprint_clusters);
+      setFuzzyClusters(r.fuzzy_clusters);
+      // Initialize per-cluster state: canonical = suggested; include = all members.
+      const init: Record<string, { canonical: string; include: Set<string> }> = {};
+      for (const c of [...r.fingerprint_clusters, ...r.fuzzy_clusters]) {
+        init[clusterKey(c)] = {
+          canonical: c.suggested_canonical,
+          include: new Set(c.members.map((m) => m.name)),
+        };
+      }
+      setClusterState(init);
+    } catch (e) {
+      setSimilarResult(String(e));
+    } finally {
+      setSimilarLoading(false);
+    }
+  }
+
+  function updateClusterCanonical(key: string, value: string) {
+    setClusterState((prev) => ({
+      ...prev,
+      [key]: { ...(prev[key] ?? { canonical: "", include: new Set() }), canonical: value },
+    }));
+  }
+
+  function toggleClusterMember(key: string, name: string) {
+    setClusterState((prev) => {
+      const state = prev[key] ?? { canonical: name, include: new Set<string>() };
+      const nextInclude = new Set(state.include);
+      if (nextInclude.has(name)) nextInclude.delete(name); else nextInclude.add(name);
+      return { ...prev, [key]: { canonical: state.canonical, include: nextInclude } };
+    });
+  }
+
+  async function handleMergeCluster(c: TagCluster) {
+    const key = clusterKey(c);
+    const state = clusterState[key];
+    if (!state) return;
+    const canonical = state.canonical.trim().toLowerCase();
+    if (!canonical) {
+      alert("Canonical name is empty — укажи каноничное имя.");
+      return;
+    }
+    const sources = Array.from(state.include).filter((n) => n !== canonical);
+    if (sources.length === 0) {
+      alert("Нет источников для merge — выбери хотя бы один тег.");
+      return;
+    }
+    if (!confirm(`Merge ${sources.length} tag(s) → "${canonical}"?\n\n  ${sources.join("\n  ")}`)) return;
+    try {
+      const r = await mergeTags(canonical, sources);
+      if (r.error) {
+        setSimilarResult(`Error: ${r.error}`);
+        return;
+      }
+      setSimilarResult(`Merged ${r.merged} → "${r.canonical}" (${r.links_remapped} links).`);
+      await loadSimilarTags();
+    } catch (e) {
+      setSimilarResult(String(e));
+    }
+  }
+
+  async function loadExtractPreview() {
+    setExtractLoading(true);
+    try {
+      const r = await fetchExtractPreview();
+      setExtractPreview(r);
+      setExtractUnchecked(new Set());
+    } catch (e) {
+      setExtractResult(String(e));
+    } finally {
+      setExtractLoading(false);
+    }
+  }
+
+  function toggleExtractTag(tag: string) {
+    setExtractUnchecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag); else next.add(tag);
+      return next;
+    });
+  }
+
+  async function handleExtractApply() {
+    if (!extractPreview) return;
+    const allowed = extractPreview.proposed_tags
+      .filter((p) => !extractUnchecked.has(p.tag))
+      .map((p) => p.tag);
+    if (allowed.length === 0) {
+      alert("Все предложенные теги сняты — нечего применять.");
+      return;
+    }
+    const totalAdditions = extractPreview.proposed_tags
+      .filter((p) => !extractUnchecked.has(p.tag))
+      .reduce((s, p) => s + p.videos, 0);
+    if (!confirm(`Добавить ${allowed.length} тегов к ${totalAdditions} видео-ссылкам?`)) return;
+    setExtractApplying(true);
+    setExtractResult(null);
+    try {
+      const r = await applyTagExtract(allowed);
+      setExtractResult(
+        `Applied ${r.applied} links across ${r.videos_touched} videos ` +
+        `(${r.tags_created} new tags created).`
+      );
+      await loadExtractPreview();
+    } catch (e) {
+      setExtractResult(String(e));
+    } finally {
+      setExtractApplying(false);
     }
   }
 
@@ -1670,6 +1815,262 @@ export default function MaintenancePage() {
             {tagPlan.merges.length === 0 && tagPlan.renames.length === 0 && tagPlan.deletes.length === 0 && (
               <p className="text-sm text-white/40">План пуст — теги уже нормализованы.</p>
             )}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
+      {/* Similar Tags — fingerprint + fuzzy clusters, manual merge */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Similar Tags (dedup)</h2>
+        <p className="text-xs text-white/40">
+          То, что нормализатор схлопнуть не смог: разные написания одного имени
+          (<code className="text-white/60">valentina nappi</code> /{" "}
+          <code className="text-white/60">valentinanappi</code>), опечатки
+          (<code className="text-white/60">Nappi</code> /{" "}
+          <code className="text-white/60">Napi</code>). Для каждой группы укажи
+          каноничное имя (можно ввести новое — будет создано), сними галки с
+          тегов, которые на самом деле <b>не</b> эквивалентны, и нажми Merge.
+        </p>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadSimilarTags} disabled={similarLoading} className={btnCls}>
+            {similarLoading ? "Scanning..." : "Find Similar Tags"}
+          </button>
+          {(fingerprintClusters.length > 0 || fuzzyClusters.length > 0) && (
+            <span className="text-xs text-white/60">
+              {fingerprintClusters.length} exact-equivalent, {fuzzyClusters.length} fuzzy
+            </span>
+          )}
+          {similarResult && <span className="text-xs text-white/60">{similarResult}</span>}
+        </div>
+
+        <SpoilerToggle
+          open={showSimilar}
+          onClick={() => setShowSimilar((v) => !v)}
+          label="clusters"
+          count={fingerprintClusters.length + fuzzyClusters.length}
+        />
+
+        {showSimilar && (
+          <div className="space-y-6">
+            {[...fingerprintClusters.map((c) => [c, "high" as const] as const),
+              ...fuzzyClusters.map((c) => [c, "medium" as const] as const)
+            ].length === 0 && !similarLoading && (
+              <p className="text-sm text-white/40">Ничего похожего — чисто.</p>
+            )}
+
+            {fingerprintClusters.length > 0 && (
+              <div>
+                <h3 className="text-sm text-white/70 mb-2">
+                  Exact-equivalent ({fingerprintClusters.length}) — высокая уверенность
+                </h3>
+                <div className="space-y-2">
+                  {fingerprintClusters.map((c) => {
+                    const key = clusterKey(c);
+                    const state = clusterState[key];
+                    return (
+                      <div key={key} className="rounded border border-white/10 bg-white/[0.03] p-3 text-xs space-y-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <label className="text-white/50">Canonical:</label>
+                          <input
+                            type="text"
+                            value={state?.canonical ?? c.suggested_canonical}
+                            onChange={(e) => updateClusterCanonical(key, e.target.value)}
+                            className="rounded bg-white/10 border border-white/10 px-2 py-1 text-white/80 min-w-[200px]"
+                          />
+                          <button
+                            onClick={() => handleMergeCluster(c)}
+                            className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-amber-200 hover:bg-amber-500/20 transition"
+                          >
+                            Merge {Array.from(state?.include ?? []).filter((n) => n !== (state?.canonical ?? "")).length}
+                          </button>
+                          <span className="text-white/30">
+                            {c.total_videos} videos total
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {c.members.map((m) => (
+                            <label
+                              key={m.name}
+                              className={`rounded px-2 py-1 cursor-pointer transition ${
+                                state?.include.has(m.name)
+                                  ? "bg-amber-500/20 border border-amber-500/40 text-amber-100"
+                                  : "bg-white/5 border border-white/10 text-white/40 line-through"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                className="hidden"
+                                checked={state?.include.has(m.name) ?? false}
+                                onChange={() => toggleClusterMember(key, m.name)}
+                              />
+                              {m.name} <span className="text-white/40">({m.videos})</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {fuzzyClusters.length > 0 && (
+              <div>
+                <h3 className="text-sm text-white/70 mb-2">
+                  Fuzzy matches ({fuzzyClusters.length}) — проверь визуально
+                </h3>
+                <div className="space-y-2">
+                  {fuzzyClusters.map((c) => {
+                    const key = clusterKey(c);
+                    const state = clusterState[key];
+                    return (
+                      <div key={key} className="rounded border border-white/10 bg-white/[0.03] p-3 text-xs space-y-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <label className="text-white/50">Canonical:</label>
+                          <input
+                            type="text"
+                            value={state?.canonical ?? c.suggested_canonical}
+                            onChange={(e) => updateClusterCanonical(key, e.target.value)}
+                            className="rounded bg-white/10 border border-white/10 px-2 py-1 text-white/80 min-w-[200px]"
+                          />
+                          <button
+                            onClick={() => handleMergeCluster(c)}
+                            className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-amber-200 hover:bg-amber-500/20 transition"
+                          >
+                            Merge {Array.from(state?.include ?? []).filter((n) => n !== (state?.canonical ?? "")).length}
+                          </button>
+                          <span className="text-white/30">
+                            {c.total_videos} videos total
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {c.members.map((m) => (
+                            <label
+                              key={m.name}
+                              className={`rounded px-2 py-1 cursor-pointer transition ${
+                                state?.include.has(m.name)
+                                  ? "bg-amber-500/20 border border-amber-500/40 text-amber-100"
+                                  : "bg-white/5 border border-white/10 text-white/40 line-through"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                className="hidden"
+                                checked={state?.include.has(m.name) ?? false}
+                                onChange={() => toggleClusterMember(key, m.name)}
+                              />
+                              {m.name} <span className="text-white/40">({m.videos})</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
+      {/* Tag extraction from filenames */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Extract Tags from Filenames</h2>
+        <p className="text-xs text-white/40">
+          Сканирует активные имена файлов и предлагает добавить теги:
+          <br />
+          {" • "}<b>студия-префикс</b> из начала имени до первого{" "}
+          <code className="text-white/60">_</code>:{" "}
+          <code className="text-white/60">stunningmatures_g603_…</code> →{" "}
+          <code className="text-white/60">stunningmatures</code>.
+          {" "}Короткие аббревиатуры (<code className="text-white/60">stm</code>,{" "}
+          <code className="text-white/60">gfm</code>) автоматически разворачиваются
+          в полное имя родительской папки, если префикс является{" "}
+          <i>letter-ordered contraction</i> первого слова папки (т.е.{" "}
+          <code className="text-white/60">stm</code> ⊂{" "}
+          <code className="text-white/60">stunningmatures</code>,{" "}
+          но <code className="text-white/60">fsm</code> ⊄{" "}
+          <code className="text-white/60">femaleagent</code>). Если папка не
+          раскрывает — фолбэк на ручной мап{" "}
+          <code className="text-white/60">STUDIO_ABBREVIATIONS</code> в{" "}
+          <code className="text-white/60">backend/services/tag_extract.py</code>.
+          <br />
+          {" • "}<b>имена через &amp;</b>:{" "}
+          <code className="text-white/60">Emilia&amp;Arthur</code> →{" "}
+          <code className="text-white/60">emilia</code>, <code className="text-white/60">arthur</code>.
+          Каждое имя должно быть с заглавной (иначе ловим мусор типа{" "}
+          <code className="text-white/60">clip&amp;scene</code>).
+          <br />
+          {" • "}сайты <code className="text-white/60">[SomeSite.com]</code>, acronyms{" "}
+          <code className="text-white/60">[OF] → onlyfans</code>, качество{" "}
+          <code className="text-white/60">4k/1080p</code>, кодек{" "}
+          <code className="text-white/60">hevc/h264</code>.
+          <br />
+          Превью показывает только <b>новые</b> связи — уже проставленные не дублируются.
+        </p>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadExtractPreview} disabled={extractLoading} className={btnCls}>
+            {extractLoading ? "Scanning..." : "Preview Extracted Tags"}
+          </button>
+          {extractPreview && (
+            <>
+              <button
+                onClick={handleExtractApply}
+                disabled={extractApplying || extractPreview.total_tags === 0}
+                className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {extractApplying ? "Applying..." : `Apply (${extractPreview.proposed_tags.filter((p) => !extractUnchecked.has(p.tag)).length} tags)`}
+              </button>
+              <span className="text-xs text-white/60">
+                {extractPreview.total_tags} proposed tags, {extractPreview.total_additions} new links
+                {" · "}
+                {extractPreview.videos_touched} videos affected
+              </span>
+            </>
+          )}
+          {extractResult && <span className="text-xs text-white/60">{extractResult}</span>}
+        </div>
+
+        <SpoilerToggle
+          open={showExtractList}
+          onClick={() => setShowExtractList((v) => !v)}
+          label="proposed tags"
+          count={extractPreview?.proposed_tags.length ?? null}
+        />
+
+        {showExtractList && extractPreview && extractPreview.proposed_tags.length === 0 && !extractLoading && (
+          <p className="text-sm text-white/40">Ничего не нашлось — все возможные теги уже проставлены.</p>
+        )}
+        {showExtractList && extractPreview && extractPreview.proposed_tags.length > 0 && (
+          <div className="space-y-2 max-h-[36rem] overflow-y-auto">
+            {extractPreview.proposed_tags.map((p) => (
+              <div key={p.tag} className="rounded border border-white/10 bg-white/[0.03] p-2 text-xs">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!extractUnchecked.has(p.tag)}
+                    onChange={() => toggleExtractTag(p.tag)}
+                  />
+                  <span className={extractUnchecked.has(p.tag) ? "text-white/40 line-through" : "text-white/80"}>
+                    <span className="font-mono text-amber-300">{p.tag}</span>
+                    <span className="text-white/40 ml-2">→ {p.videos} videos</span>
+                  </span>
+                </label>
+                {p.sample_videos.length > 0 && (
+                  <div className="mt-1 pl-6 space-y-0.5">
+                    {p.sample_videos.map((v) => (
+                      <p key={v.id} className="truncate text-white/40">{v.filename}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </section>

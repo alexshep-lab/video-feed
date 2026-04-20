@@ -876,6 +876,64 @@ def tags_normalize_apply(db: Session = Depends(get_db)) -> dict:
     return apply_tag_normalization(db)
 
 
+# ---- Tag dedup: find similar clusters + manual merge ----
+
+@router.get("/tags/similar")
+def tags_find_similar(db: Session = Depends(get_db)) -> dict:
+    """Cluster tags that look alike (shared fingerprint or edit-distance).
+
+    Read-only. Two buckets:
+      - ``fingerprint_clusters`` — identical alnum-only form, high confidence
+      - ``fuzzy_clusters`` — near-duplicates (typos); user should eyeball each
+    """
+    from ..services.tag_dedup import find_tag_clusters
+    return find_tag_clusters(db)
+
+
+@router.post("/tags/merge")
+def tags_merge(
+    canonical: str = Body(..., embed=True),
+    sources: list[str] = Body(..., embed=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Merge every ``sources`` tag into ``canonical``.
+
+    ``canonical`` may be a brand-new name — it's created on demand so the
+    user can fix noisy variants by typing the clean spelling directly.
+    """
+    from ..services.tag_dedup import merge_tags_manual
+    try:
+        return merge_tags_manual(db, canonical, sources)
+    except ValueError as e:
+        return {"error": str(e)}
+
+
+# ---- Tag extraction from filenames ----
+
+@router.get("/tags/extract-preview")
+def tags_extract_preview(db: Session = Depends(get_db)) -> dict:
+    """Dry-run: per proposed tag, count + 5 sample filenames.
+
+    Only shows NET additions — pairs already present are filtered out.
+    """
+    from ..services.tag_extract import plan_extraction
+    return plan_extraction(db)
+
+
+@router.post("/tags/extract")
+def tags_extract_apply(
+    tag_whitelist: list[str] | None = Body(default=None, embed=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Assign extracted tags across all active videos.
+
+    ``tag_whitelist`` narrows to specific tag names (the UI passes the set
+    the user left checked). ``None`` or missing → apply every proposal.
+    """
+    from ..services.tag_extract import apply_extraction
+    return apply_extraction(db, tag_whitelist=tag_whitelist)
+
+
 # ---- Encoder info ----
 
 @router.get("/encoder")
