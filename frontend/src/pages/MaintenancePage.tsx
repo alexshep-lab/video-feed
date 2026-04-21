@@ -1540,7 +1540,7 @@ export default function MaintenancePage() {
         <h2 className="text-xl font-semibold text-white/80">Compress Archive</h2>
         <p className="text-xs text-white/40">
           После сжатия оригинал перемещается в <code className="text-white/60">big_archive_dir</code>
-          (по умолчанию <code className="text-white/60">L:\Prvt\big</code>). Если архив на том же диске,
+          (настраивается через <code className="text-white/60">VIDEOFEED_BIG_ARCHIVE_DIR</code>). Если архив на том же диске,
           что и библиотека, место не освобождается. Здесь можно отправить оригиналы в Корзину,
           когда сжатые копии проверены и устраивают.
         </p>

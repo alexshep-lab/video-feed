@@ -38,9 +38,27 @@ class Settings(BaseSettings):
     database_path: Path = Field(default=APPDATA_ROOT / "data" / "videofeed.db")
     ffprobe_binary: str = "ffprobe"
     ffmpeg_binary: str = "ffmpeg"
-    big_archive_dir: Path = Field(default=Path(r"L:\Prvt\big"))
+    # Where FHD-compression moves the pre-compression originals. Defaults
+    # under APPDATA so a fresh install has a valid path; point at a bigger
+    # drive via VIDEOFEED_BIG_ARCHIVE_DIR once you start compressing.
+    big_archive_dir: Path = Field(default=APPDATA_ROOT / "big")
     # Encoder selection: "auto" (use NVENC if available), "cpu" (force libx264), "nvenc" (force h264_nvenc)
     encoder_mode: str = "auto"
+    # CORS: semicolon-separated list of allowed origins. Empty / unset =
+    # loopback only (safe default). Set to "*" to allow any origin (only
+    # for trusted local networks — the server has no auth).
+    cors_origins_raw: str | None = None
+
+    @property
+    def cors_origins(self) -> list[str]:
+        if not self.cors_origins_raw:
+            return [
+                "http://localhost:7999",
+                "http://127.0.0.1:7999",
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+            ]
+        return [o.strip() for o in self.cors_origins_raw.split(";") if o.strip()]
 
     @property
     def library_dirs(self) -> list[Path]:

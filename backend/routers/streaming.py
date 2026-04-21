@@ -53,8 +53,16 @@ def stream_hls(video_id: str, path: str, db: Session = Depends(get_db)):
     """Serve HLS master playlist, variant playlists, and .ts segments."""
     from ..config import get_settings
     settings = get_settings()
-    hls_dir = settings.hls_dir / video_id
-    file_path = hls_dir / path
+    hls_dir = (settings.hls_dir / video_id).resolve()
+    # Guard against path traversal via `..` or absolute components.
+    # Resolve the requested path under hls_dir and require the result to
+    # stay inside hls_dir — rejects `../../etc/passwd` and drive-letter
+    # escapes on Windows.
+    try:
+        file_path = (hls_dir / path).resolve()
+        file_path.relative_to(hls_dir)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="HLS file not found")
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="HLS file not found")
 

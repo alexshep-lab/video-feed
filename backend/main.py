@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
 # Windows/asyncio logs ConnectionResetError when the browser aborts a video
@@ -15,6 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
+from . import __release_date__, __version__
 from .config import get_settings
 from .database import Base, SessionLocal, active_database_url, engine
 from .models import LibraryFolder
@@ -38,6 +40,9 @@ from .services.transcoder import start_worker, stop_worker
 settings = get_settings()
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _migrate_videos_table() -> None:
     """Add columns introduced after the initial schema. SQLite-only, idempotent.
 
@@ -58,6 +63,11 @@ def _migrate_videos_table() -> None:
             for row in connection.exec_driver_sql("PRAGMA table_info(videos)").fetchall()
         }
         for col_name, col_def in expected:
+            # Defensive: the pair comes from a hardcoded literal above, but if
+            # someone edits this list later a bad identifier shouldn't become
+            # an injection vector.
+            if not _IDENT_RE.match(col_name):
+                raise ValueError(f"Refusing to migrate with invalid identifier: {col_name!r}")
             if col_name not in existing_cols:
                 logging.getLogger(__name__).info("Migrating videos table: adding column %s", col_name)
                 connection.exec_driver_sql(f"ALTER TABLE videos ADD COLUMN {col_name} {col_def}")
@@ -120,11 +130,22 @@ async def lifespan(_: FastAPI):
     await stop_palette_worker()
 
 
-app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
+app = FastAPI(
+    title=settings.app_name,
+    version=__version__,
+    debug=settings.debug,
+    lifespan=lifespan,
+)
+# CORS: allow_origins="*" + allow_credentials=True is an unsafe combination,
+# so we either whitelist specific origins (credentials allowed) or use "*"
+# with credentials explicitly disabled. The default origin list covers the
+# FastAPI port and the Vite dev server on localhost.
+_cors_origins = settings.cors_origins
+_wildcard_cors = _cors_origins == ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=not _wildcard_cors,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -149,13 +170,29 @@ if _assets_dir.exists():
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
     database_mode = "memory" if ":memory:" in active_database_url else "file"
-    return {"status": "ok", "database": database_mode}
+    return {
+        "status": "ok",
+        "database": database_mode,
+        "version": __version__,
+        "release_date": __release_date__,
+    }
+
+
+@app.get("/api/version")
+def version_endpoint() -> dict[str, str]:
+    return {
+        "version": __version__,
+        "release_date": __release_date__,
+        "name": settings.app_name,
+    }
 
 
 @app.get("/{full_path:path}")
 def frontend_app(full_path: str):
+    # Unknown api/health paths must 404 — don't shadow them with the SPA
+    # index.html, which would break clients (and mask routing typos).
     if full_path.startswith("api/") or full_path == "health":
-        return {"detail": "Not Found"}
+        raise HTTPException(status_code=404, detail="Not Found")
     if not Path(STATIC_INDEX).exists():
         return {"detail": "Frontend not built"}
     # index.html must never be cached: it's the only file that points at the
