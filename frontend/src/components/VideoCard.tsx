@@ -14,6 +14,13 @@ type VideoCardProps = {
    * the review flow on HomePage to propagate the current filter so WatchPage
    * can auto-advance to the next matching video. */
   linkQuery?: string;
+  /** Set of tag names currently active in the library filter. Used to
+   * highlight the chip and flip the toggle direction. */
+  activeTags?: Set<string>;
+  /** Called when a tag chip is clicked. When provided, the chip becomes a
+   * button that toggles the tag in the parent filter instead of letting
+   * the click fall through to the watch link. */
+  onTagClick?: (tag: string) => void;
 };
 
 export default function VideoCard({
@@ -21,6 +28,8 @@ export default function VideoCard({
   showPath = false,
   showExtraMeta = false,
   linkQuery,
+  activeTags,
+  onTagClick,
 }: VideoCardProps) {
   const [frameIndex, setFrameIndex] = useState(0);
   const [hovered, setHovered] = useState(false);
@@ -92,6 +101,47 @@ export default function VideoCard({
             {video.original_path}
           </div>
         ) : null}
+        {video.tag_list && video.tag_list.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {video.tag_list.slice(0, 3).map((tag) => {
+              const active = activeTags?.has(tag);
+              const base = "truncate rounded px-1.5 py-0.5 text-[10px]";
+              const cls = active
+                ? `${base} bg-accent/30 text-accent`
+                : `${base} bg-white/5 text-white/60`;
+              if (onTagClick) {
+                return (
+                  <button
+                    key={tag}
+                    onClick={(e) => {
+                      // Don't navigate to the watch page when toggling a tag.
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onTagClick(tag);
+                    }}
+                    className={`${cls} cursor-pointer transition hover:bg-accent/20 hover:text-accent`}
+                    title={active ? `Remove "${tag}" from filter` : `Filter by "${tag}"`}
+                  >
+                    {tag}
+                  </button>
+                );
+              }
+              return (
+                <span key={tag} className={cls} title={tag}>
+                  {tag}
+                </span>
+              );
+            })}
+            {video.tag_list.length > 3 && (
+              <span
+                className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-white/40"
+                title={video.tag_list.slice(3).join(", ")}
+              >
+                +{video.tag_list.length - 3}
+              </span>
+            )}
+          </div>
+        )}
         <div className="flex items-center justify-between text-sm text-white/55">
           <span>{video.codec ?? "unknown"}</span>
           <span>{formatFileSize(video.file_size)}</span>

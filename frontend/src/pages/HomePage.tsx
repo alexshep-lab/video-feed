@@ -49,6 +49,8 @@ export default function HomePage() {
   const [tagSearch, setTagSearch] = useState("");
   const [codec, setCodec] = useState("");
   const [library, setLibrary] = useState("");
+  // "all" — без фильтра, "only" — только избранные, "hide" — скрыть избранные
+  const [favoriteFilter, setFavoriteFilter] = useState<"all" | "only" | "hide">("all");
 
   const folderInputRef = useRef<HTMLInputElement>(null);
   const addFolderSectionRef = useRef<HTMLDivElement>(null);
@@ -74,7 +76,7 @@ export default function HomePage() {
     setPage(0);
     setVideos([]);
     setHasMore(true);
-  }, [q, sort, selectedTags, tagMode, codec, library, mode, reviewFilter, readyOnly]);
+  }, [q, sort, selectedTags, tagMode, codec, library, favoriteFilter, mode, reviewFilter, readyOnly]);
 
   useEffect(() => {
     let cancelled = false;
@@ -91,6 +93,8 @@ export default function HomePage() {
     }
     if (codec) params.codec = codec;
     if (library) params.library = library;
+    if (favoriteFilter === "only") params.favorite = true;
+    if (favoriteFilter === "hide") params.favorite = false;
     if (mode === "unconfirmed") {
       if (reviewFilter === "unconfirmed") params.confirmed = false;
       if (reviewFilter === "confirmed") params.confirmed = true;
@@ -118,7 +122,7 @@ export default function HomePage() {
       });
 
     return () => { cancelled = true; };
-  }, [q, sort, selectedTags, tagMode, codec, library, mode, reviewFilter, readyOnly, page]);
+  }, [q, sort, selectedTags, tagMode, codec, library, favoriteFilter, mode, reviewFilter, readyOnly, page]);
 
   useEffect(() => {
     if (loading || loadingMore || !hasMore) return;
@@ -191,6 +195,12 @@ export default function HomePage() {
     setTimeout(() => folderInputRef.current?.focus(), 300);
   }
 
+  function toggleTag(tag: string) {
+    setSelectedTags((prev) => (prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]));
+  }
+
+  const activeTagSet = new Set(selectedTags);
+
   async function confirmVideo(videoId: string) {
     const current = videos.find((v) => v.id === videoId);
     if (!current) return;
@@ -229,6 +239,34 @@ export default function HomePage() {
           <select value={sort} onChange={(e) => setSort(e.target.value)} className={selectCls}>
             {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
+        </div>
+
+        {/* Favorites toggle — cycles all → only → hide → all */}
+        <div className="space-y-1">
+          <label className="text-xs uppercase tracking-wider text-white/35">Favorites</label>
+          <div className="flex gap-0 overflow-hidden rounded-lg border border-white/10 text-xs">
+            <button
+              onClick={() => setFavoriteFilter("all")}
+              className={`flex-1 py-1.5 transition ${favoriteFilter === "all" ? "bg-accent/20 text-accent" : "text-white/55 hover:text-white hover:bg-white/5"}`}
+              title="Show all videos"
+            >
+              All
+            </button>
+            <button
+              onClick={() => setFavoriteFilter("only")}
+              className={`flex-1 py-1.5 transition ${favoriteFilter === "only" ? "bg-accent/20 text-accent" : "text-white/55 hover:text-white hover:bg-white/5"}`}
+              title="Only favorites"
+            >
+              ★ Only
+            </button>
+            <button
+              onClick={() => setFavoriteFilter("hide")}
+              className={`flex-1 py-1.5 transition ${favoriteFilter === "hide" ? "bg-accent/20 text-accent" : "text-white/55 hover:text-white hover:bg-white/5"}`}
+              title="Hide favorites"
+            >
+              Hide ★
+            </button>
+          </div>
         </div>
 
         <div className="space-y-1">
@@ -318,60 +356,31 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Codec */}
-        {filters?.codecs && filters.codecs.length > 0 && (
+        {/* Codec / Library filters were removed — tags cover the same ground.
+            The underlying state (`codec`, `library`) and backend params are
+            still wired up so URL-based filtering keeps working for anyone who
+            bookmarked a filtered view. */}
+
+        {/* Incoming folders — quick "add video here" links. The library
+            filter is gone but the ⬆ upload shortcut is still useful. */}
+        {libraries.some((l) => l.is_incoming) && (
           <div className="space-y-1">
-            <label className="text-xs uppercase tracking-wider text-white/35">Codec</label>
-            <select value={codec} onChange={(e) => setCodec(e.target.value)} className={selectCls}>
-              <option value="">All codecs</option>
-              {filters.codecs.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <div className="max-h-32 overflow-y-auto space-y-0.5 mt-1">
-              {filters.codecs.map((c) => (
+            <label className="text-xs uppercase tracking-wider text-white/35">Incoming</label>
+            <div className="max-h-32 space-y-0.5 overflow-y-auto">
+              {libraries.filter((l) => l.is_incoming).map((l) => (
                 <button
-                  key={c}
-                  onClick={() => setCodec(codec === c ? "" : c)}
-                  className={`w-full text-left px-2 py-0.5 rounded text-xs transition ${codec === c ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white hover:bg-white/5"}`}
+                  key={l.id}
+                  onClick={() => handleIncomingClick(l.path)}
+                  title={l.path}
+                  className="flex w-full items-center gap-1 rounded px-2 py-0.5 text-left text-xs text-white/50 transition hover:bg-white/5 hover:text-white"
                 >
-                  {c}
+                  <span className="shrink-0 text-accent/70">⬆</span>
+                  <span className="truncate">{l.display_name ?? l.path}</span>
                 </button>
               ))}
             </div>
           </div>
         )}
-
-        {/* Libraries */}
-        <div className="space-y-1">
-          <label className="text-xs uppercase tracking-wider text-white/35">Library</label>
-          <select value={library} onChange={(e) => setLibrary(e.target.value)} className={selectCls}>
-            <option value="">All libraries</option>
-            {libraries.map((l) => (
-              <option key={l.id} value={l.path}>{l.display_name ?? l.path} ({l.video_count})</option>
-            ))}
-          </select>
-          <div className="max-h-32 overflow-y-auto space-y-0.5 mt-1">
-            {libraries.map((l) => (
-              <div key={l.id} className="flex items-center gap-1">
-                <button
-                  onClick={() => setLibrary(library === l.path ? "" : l.path)}
-                  className={`flex-1 text-left px-2 py-0.5 rounded text-xs transition truncate ${library === l.path ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white hover:bg-white/5"}`}
-                  title={l.path}
-                >
-                  {l.display_name ?? l.path} <span className="text-white/30">({l.video_count})</span>
-                </button>
-                {l.is_incoming && (
-                  <button
-                    onClick={() => handleIncomingClick(l.path)}
-                    title="Add video to this folder"
-                    className="shrink-0 px-1 py-0.5 rounded text-xs text-accent/70 hover:text-accent hover:bg-accent/10 transition"
-                  >
-                    ⬆
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
 
         <hr className="border-white/10" />
 
@@ -467,7 +476,14 @@ export default function HomePage() {
                 const linkQuery = reviewParams.toString();
                 return (
                 <div key={v.id} className="relative">
-                  <VideoCard video={v} showPath showExtraMeta linkQuery={linkQuery} />
+                  <VideoCard
+                    video={v}
+                    showPath
+                    showExtraMeta
+                    linkQuery={linkQuery}
+                    activeTags={activeTagSet}
+                    onTagClick={toggleTag}
+                  />
                   <button
                     onClick={() => confirmVideo(v.id)}
                     className={`mt-1 w-full rounded-lg px-3 py-1 text-xs transition ${
@@ -486,7 +502,12 @@ export default function HomePage() {
         )}
 
         {!loading && mode === "library" && !error && (
-          <VideoGrid videos={videos} minCardWidth={tileSize} />
+          <VideoGrid
+            videos={videos}
+            minCardWidth={tileSize}
+            activeTags={activeTagSet}
+            onTagClick={toggleTag}
+          />
         )}
 
         {!loading && !error && (

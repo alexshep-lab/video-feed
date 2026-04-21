@@ -19,7 +19,7 @@ export default function Layout({ children }: PropsWithChildren) {
   return (
     <div className="flex min-h-screen flex-col bg-[radial-gradient(circle_at_top,_rgba(255,122,24,0.25),_transparent_28%),linear-gradient(180deg,_#11182a_0%,_#090d18_100%)] text-white">
       <header className="border-b border-white/10 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
+        <div className="mx-auto flex max-w-[1800px] items-center justify-between px-6 py-5">
           <Link to="/" className="text-2xl font-semibold tracking-[0.18em] text-accentSoft">
             VIDEOFEED
           </Link>
@@ -30,9 +30,9 @@ export default function Layout({ children }: PropsWithChildren) {
           </nav>
         </div>
       </header>
-      <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-8">{children}</main>
+      <main className="mx-auto w-full max-w-[1800px] flex-1 px-6 py-8">{children}</main>
       <footer className="border-t border-white/5 py-4">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 text-xs text-white/40">
+        <div className="mx-auto flex max-w-[1800px] items-center justify-between gap-4 px-6 text-xs text-white/40">
           <span>
             VideoFeed
             {version ? ` v${version.version}` : ""}

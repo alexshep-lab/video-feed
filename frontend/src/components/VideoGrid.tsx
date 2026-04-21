@@ -6,6 +6,8 @@ type VideoGridProps = {
   minCardWidth?: number;
   showPath?: boolean;
   showExtraMeta?: boolean;
+  activeTags?: Set<string>;
+  onTagClick?: (tag: string) => void;
 };
 
 export default function VideoGrid({
@@ -13,6 +15,8 @@ export default function VideoGrid({
   minCardWidth = 260,
   showPath = false,
   showExtraMeta = false,
+  activeTags,
+  onTagClick,
 }: VideoGridProps) {
   return (
     <div
@@ -25,6 +29,8 @@ export default function VideoGrid({
           video={video}
           showPath={showPath}
           showExtraMeta={showExtraMeta}
+          activeTags={activeTags}
+          onTagClick={onTagClick}
         />
       ))}
     </div>
