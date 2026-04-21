@@ -386,15 +386,30 @@ def get_recommendations(
     limit: int = Query(default=10, ge=1, le=50),
     db: Session = Depends(get_db),
 ) -> list[VideoListItem]:
-    """Simple scoring: shared tags * 3 + same library * 2 + similar duration * 1."""
+    """Scoring: shared tags * 3 + same library * 2 + similar duration * 1
+    + never-watched * 1, with randomized tie-break inside each score tier.
+
+    Why the randomization: tag-overlap scores have a small range (0..~9 in
+    practice), so many candidates tie on score. A stable sort over a
+    stable ``limit(200)`` candidate pool produced the same top-N every
+    time a user opened *any* tag-heavy video — the "Related" row looked
+    like the same 3-4 clips on rotation. We now (1) randomly sample the
+    candidate pool so rare tails get a chance, and (2) break ties with a
+    per-call random key so within-tier order varies between visits.
+    """
+    import random
+
     video = db.get(Video, video_id)
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
 
     tag_ids = [t.id for t in video.tag_objects]
+    tag_id_set = set(tag_ids)
     duration = video.duration or 0
 
-    # Candidates: videos sharing at least one tag, OR same library
+    # Candidates: videos sharing at least one tag, OR (fallback) same library.
+    # ``func.random()`` makes the limit diverse — for huge tag sets we
+    # previously saw only the first 200 rows by ROWID over and over.
     statement = select(Video).where(Video.id != video_id, Video.deleted_at.is_(None))
     if tag_ids:
         statement = statement.where(
@@ -405,22 +420,27 @@ def get_recommendations(
     elif video.library_path:
         statement = statement.where(Video.library_path == video.library_path)
 
-    candidates = db.scalars(statement.limit(200)).all()
+    candidates = db.scalars(statement.order_by(func.random()).limit(400)).all()
 
     def score(v: Video) -> int:
         s = 0
         v_tag_ids = {t.id for t in v.tag_objects}
-        s += len(v_tag_ids & set(tag_ids)) * 3
+        s += len(v_tag_ids & tag_id_set) * 3
         if v.library_path == video.library_path:
             s += 2
         if duration and v.duration:
             ratio = min(duration, v.duration) / max(duration, v.duration)
             if ratio > 0.7:
                 s += 1
+        # Nudge never-watched videos up: without it, a handful of popular
+        # clips with view_count>0 dominate every recommendation row.
+        if (v.view_count or 0) == 0:
+            s += 1
         return s
 
-    ranked = sorted(candidates, key=score, reverse=True)[:limit]
-    return [to_list_item(request, v) for v in ranked]
+    # Sort by (-score, random key) so tied scores get shuffled per call.
+    ranked = sorted(candidates, key=lambda v: (-score(v), random.random()))
+    return [to_list_item(request, v) for v in ranked[:limit]]
 
 
 # ---- Delete / Restore ----
