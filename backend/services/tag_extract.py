@@ -43,6 +43,35 @@ logger = logging.getLogger("videofeed.tag_extract")
 # through as-is (lowercased); the dedup UI can merge variants later.
 _STUDIO_PREFIX_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9]{2,})_")
 
+# Space-separated variant of the same idea:
+#   "girlsformatures g1009 Susanna & Nora"
+#   "straponscreen g740 Susanna & Connor"
+# The "gNNN" scene-code marker is what distinguishes this from generic
+# "first word of any title" — without the anchor we'd tag every random
+# sentence's opening word.
+_STUDIO_PREFIX_SPACE_RE = re.compile(
+    r"^([a-zA-Z][a-zA-Z0-9]{2,})\s+g\d+\s",
+    re.IGNORECASE,
+)
+
+# Leading CamelCase / MixedCase studio followed by " - ":
+#   "!DorcelClub - 2020.03.02 Anissa Kate..."
+#   "FemdomEmpire - 2014 Fucked..."
+#   "21FootArt - 2015.03.21 Princess..."
+# We require at least one uppercase letter *beyond* the first character
+# (or a digit mixed in) so plain "Mila - foo" (actor name) doesn't get
+# mis-tagged as a studio.
+_STUDIO_PREFIX_DASH_RE = re.compile(
+    r"^!?([A-Z0-9][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*)\s*-\s+",
+)
+
+# Leading bracketed studio: "[AdamAndEve] ...", "[3rdDegree] ..."
+# Same mixedCase requirement — bracketed acronyms like "[OF]" or sites
+# like "[SiteName.com]" are handled by the separate bracket scanner.
+_STUDIO_BRACKET_PREFIX_RE = re.compile(
+    r"^\[([A-Z0-9][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*)\]\s",
+)
+
 STUDIO_ABBREVIATIONS: dict[str, str] = {
     # Manual fallback. Folder-based auto-expansion (see
     # ``_expansion_from_folder``) usually handles this when the parent
@@ -98,7 +127,7 @@ def _expansion_from_folder(prefix: str, folder_name: str | None) -> str | None:
 # intentionally require capitalization — otherwise generic joined words
 # like ``clip&scene`` or ``full&uncut`` bleed into tags. If your library
 # has lowercase names, rename first or ask to relax this rule.
-_NAME_AMP_RE = re.compile(r"([A-Z][a-zA-Z]{2,})(?:&([A-Z][a-zA-Z]{2,}))+")
+_NAME_AMP_RE = re.compile(r"([A-Z][a-zA-Z]{2,})(?:\s*&\s*([A-Z][a-zA-Z]{2,}))+")
 
 
 # ---- Quality / resolution ----
@@ -157,9 +186,18 @@ def extract_tags_from_filename(
     stem = filename.rsplit(".", 1)[0]  # drop the extension
     tags: set[str] = set()
 
-    # Studio prefix (first alnum token before an underscore). Expansion
-    # precedence: folder-derived > manual map > prefix as-is.
-    prefix_match = _STUDIO_PREFIX_RE.match(stem)
+    # Studio prefix — try each separator style, first match wins. Patterns
+    # in user libraries we've seen:
+    #   underscore: "stunningmatures_g603_Emilia&Arthur"
+    #   space+gNN:  "girlsformatures g1009 Susanna & Nora"
+    #   dash:       "!DorcelClub - 2020.03.02 Anissa Kate..."
+    #   bracket:    "[3rdDegree] Girlfriends 6..."
+    prefix_match = (
+        _STUDIO_PREFIX_RE.match(stem)
+        or _STUDIO_PREFIX_SPACE_RE.match(stem)
+        or _STUDIO_PREFIX_DASH_RE.match(stem)
+        or _STUDIO_BRACKET_PREFIX_RE.match(stem)
+    )
     if prefix_match:
         prefix = prefix_match.group(1).lower()
         expansion = (

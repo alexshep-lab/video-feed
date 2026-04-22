@@ -12,6 +12,7 @@ from ..config import get_settings
 from ..models import LibraryFolder, Tag, Video
 from .converter import enqueue_convert, needs_conversion, start_convert_worker
 from .metadata import SUPPORTED_EXTENSIONS, extract_video_metadata
+from .tag_extract import extract_tags_from_filename
 from .tag_normalize import normalize_tag_name
 from .thumbnail import generate_thumbnail
 
@@ -428,8 +429,26 @@ def _apply_folder_tags(
     except ValueError:
         pass
 
+    # 3) Filename-derived tags (studio prefix, &-joined actor names,
+    # quality/codec markers, bracketed sites). We apply these *only if the
+    # tag already exists in the DB* — a tag becomes "canonical" when the
+    # user approves it via Maintenance → Extract Tags from Filenames. After
+    # that, every new scan glues the tag to matching filenames automatically.
+    # Scanner doesn't create brand-new tags from filenames — that path stays
+    # opt-in through the maintenance preview to avoid auto-polluting the DB.
+    folder_hint = file_resolved.parent.name
+    filename_tags = extract_tags_from_filename(file_resolved.name, folder_hint=folder_hint)
+    for name in filename_tags:
+        if name and name not in seen:
+            folder_names.append(name)
+            seen.add(name)
+
     if not folder_names:
         return
+
+    # Precompute: which of these names are filename-only (must already exist)
+    # vs. folder-derived (scanner may create them — same behaviour as before).
+    folder_derived: set[str] = set(folder_names) - set(filename_tags)
 
     existing_tag_names = {t.name for t in video.tag_objects}
     for name in folder_names:
@@ -438,10 +457,14 @@ def _apply_folder_tags(
         tag = tag_cache.get(name)
         if not tag:
             tag = session.scalar(select(Tag).where(Tag.name == name))
-            if not tag:
+            if tag is None and name in folder_derived:
+                # Folder names auto-create a Tag row (long-standing behaviour).
                 tag = Tag(name=name)
                 session.add(tag)
                 session.flush()
+            if tag is None:
+                # Filename-derived tag that hasn't been approved yet — skip.
+                continue
             tag_cache[name] = tag
         video.tag_objects.append(tag)
         existing_tag_names.add(name)
