@@ -402,6 +402,25 @@ export async function purgeCompressArchive(body: {
   return r.json();
 }
 
+// ---- Missing files (DB row exists, source file gone) ----
+
+export type MissingFileItem = {
+  id: string;
+  title: string;
+  original_filename: string;
+  original_path: string;
+};
+
+export async function fetchMissingFiles(): Promise<{ count: number; items: MissingFileItem[] }> {
+  const r = await fetch(`${API_BASE}/maintenance/missing-files`);
+  return r.json();
+}
+
+export async function purgeMissingFiles(): Promise<{ purged: number }> {
+  const r = await fetch(`${API_BASE}/maintenance/missing-files/purge`, { method: "POST" });
+  return r.json();
+}
+
 // ---- Tag normalization ----
 
 export type TagNormalizePlan = {

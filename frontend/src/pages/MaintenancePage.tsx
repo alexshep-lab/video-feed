@@ -45,6 +45,9 @@ import {
   stopPalettes,
   PaletteStatus,
   PaletteSort,
+  fetchMissingFiles,
+  purgeMissingFiles,
+  MissingFileItem,
   fetchOrphans,
   retryOrphan,
   retryAllOrphans,
@@ -242,6 +245,35 @@ export default function MaintenancePage() {
   const [palettePage, setPalettePage] = useState(0);
   const [paletteSort, setPaletteSort] = useState<PaletteSort>("name");
   const [paletteLoading, setPaletteLoading] = useState(false);
+
+  // Missing files — DB rows whose source file has vanished
+  const [missing, setMissing] = useState<MissingFileItem[]>([]);
+  const [missingLoading, setMissingLoading] = useState(false);
+  const [missingResult, setMissingResult] = useState<string | null>(null);
+  const [missingPurging, setMissingPurging] = useState(false);
+
+  async function loadMissing() {
+    setMissingLoading(true);
+    try {
+      const r = await fetchMissingFiles();
+      setMissing(r.items);
+      setMissingResult(r.count === 0 ? "Нет призрачных рядов — всё чисто." : `Найдено: ${r.count}`);
+    } finally {
+      setMissingLoading(false);
+    }
+  }
+
+  async function handlePurgeMissing() {
+    if (!confirm(`Жёстко удалить ${missing.length} ряд(ов) без файлов на диске? Отменить нельзя.`)) return;
+    setMissingPurging(true);
+    try {
+      const r = await purgeMissingFiles();
+      setMissingResult(`Удалено: ${r.purged}`);
+      await loadMissing();
+    } finally {
+      setMissingPurging(false);
+    }
+  }
 
   // Locked / orphan files
   const [orphans, setOrphans] = useState<OrphanItem[]>([]);
@@ -2127,6 +2159,49 @@ export default function MaintenancePage() {
 
       <hr className="border-white/10" />
 
+      {/* Missing files — DB rows whose source file has vanished from disk */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Missing Files</h2>
+        <p className="text-xs text-white/40">
+          Ряды, у которых в БД есть запись, но файла на диске нет. Обычно —
+          перемещён / переименован / удалён вне приложения. Такие видео
+          всегда «весят балластом» в списках кандидатов на конвертацию и
+          сжатие. Кнопка <b>Purge</b> жёстко удаляет ряды + кэш превьюшек.
+          Файлы не трогаются (их и так нет).
+        </p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={loadMissing} disabled={missingLoading} className={btnCls}>
+            {missingLoading ? "Scanning..." : `Find Missing (${missing.length})`}
+          </button>
+          {missing.length > 0 && (
+            <button
+              onClick={handlePurgeMissing}
+              disabled={missingPurging}
+              className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {missingPurging ? "Purging..." : `Purge ${missing.length} rows`}
+            </button>
+          )}
+          {missingResult && <span className="text-xs text-white/60">{missingResult}</span>}
+        </div>
+
+        {missing.length > 0 && (
+          <div className="space-y-1.5 max-h-96 overflow-y-auto">
+            {missing.map((v) => (
+              <div
+                key={v.id}
+                className="rounded-lg border border-white/10 bg-white/[0.03] p-2 text-xs"
+              >
+                <p className="truncate text-white/80">{v.original_filename}</p>
+                <p className="truncate text-white/40" title={v.original_path}>{v.original_path}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
       {/* Video palettes (contact sheets) — batch generation */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Video Palettes</h2>
@@ -2153,7 +2228,7 @@ export default function MaintenancePage() {
                 <span className="text-white">{paletteStatus.batch_failed_jobs}</span>
               </div>
               <div>
-                <span className="text-white/40">Missing on disk: </span>
+                <span className="text-white/40">Palette not yet built: </span>
                 <span className="text-white">{paletteMissing ?? "?"}</span>
               </div>
             </div>
