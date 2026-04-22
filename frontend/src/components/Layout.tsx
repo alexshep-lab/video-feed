@@ -20,8 +20,17 @@ export default function Layout({ children }: PropsWithChildren) {
     <div className="flex min-h-screen flex-col bg-[radial-gradient(circle_at_top,_rgba(255,122,24,0.25),_transparent_28%),linear-gradient(180deg,_#11182a_0%,_#090d18_100%)] text-white">
       <header className="border-b border-white/10 backdrop-blur">
         <div className="mx-auto flex max-w-[1800px] items-center justify-between px-6 py-5">
-          <Link to="/" className="text-2xl font-semibold tracking-[0.18em] text-accentSoft">
-            VIDEOFEED
+          <Link
+            to="/"
+            className="flex items-center gap-3 text-accentSoft transition hover:opacity-90"
+          >
+            <img
+              src="/assets/logo/videofeed-mark.svg"
+              alt=""
+              className="h-9 w-9"
+              aria-hidden="true"
+            />
+            <span className="text-2xl font-semibold tracking-[0.18em]">VIDEOFEED</span>
           </Link>
           <nav className="flex items-center gap-6">
             <NavLink to="/" end className={navCls}>Library</NavLink>
