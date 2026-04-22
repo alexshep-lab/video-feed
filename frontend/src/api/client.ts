@@ -84,6 +84,7 @@ export type VideoFilters = {
   duration_min?: number;
   duration_max?: number;
   sort?: string;
+  shuffle_seed?: number;
   offset?: number;
   limit?: number;
   confirmed?: boolean;

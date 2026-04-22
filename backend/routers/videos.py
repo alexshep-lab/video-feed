@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import Select, desc, func, or_, select
+from sqlalchemy import Select, desc, func, literal_column, or_, select
 from sqlalchemy.sql.expression import text
 from sqlalchemy.orm import Session
 
@@ -43,6 +43,30 @@ def _apply_ready_sql(statement):
 def _video_is_review_ready(video: Video) -> bool:
     """Second-stage Python filter for ``ready=true``: palette file on disk."""
     return palette_exists(video.id)
+
+
+def _shuffle_order(seed: int | None):
+    """Stable pseudo-random ORDER BY for paginated shuffle.
+
+    ``ORDER BY RANDOM()`` re-shuffles on every query, so page 2 of an
+    offset-paginated list contains videos the client already showed on
+    page 1 — after de-dup, the infinite-scroll runs out early (the user
+    stops receiving new items even though more match the filter). Symptom
+    on a 187-row result was ~128 unique videos before hitting "no more".
+
+    Fix: if the client supplies a ``shuffle_seed`` we order by
+    ``(rowid * seed) % big_prime``. For a prime modulus (Mersenne 31), any
+    non-zero seed is coprime with the modulus, so this is a bijection —
+    stable permutation, no collisions, evenly spread. Pagination becomes
+    consistent across pages as long as the client keeps the same seed.
+
+    Without a seed we fall back to RANDOM() so single-shot queries (e.g.
+    /videos/random) still get fresh randomness.
+    """
+    if seed is None or seed == 0:
+        return text("RANDOM()")
+    rowid = literal_column("rowid")
+    return (rowid * seed) % 2147483647
 
 
 def _apply_tag_filters(
@@ -103,6 +127,7 @@ def list_videos(
     ready: bool | None = Query(default=None),
     show_deleted: bool = Query(default=False),
     sort: str = Query(default="shuffle"),
+    shuffle_seed: int | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=1000),
     db: Session = Depends(get_db),
@@ -117,7 +142,9 @@ def list_videos(
         "last_watched": desc(Video.last_watched_at),
     }
     if sort == "shuffle":
-        statement: Select[tuple[Video]] = select(Video).order_by(text("RANDOM()"))
+        statement: Select[tuple[Video]] = select(Video).order_by(
+            _shuffle_order(shuffle_seed)
+        )
     else:
         statement = select(Video).order_by(ordering.get(sort, desc(Video.added_at)))
 
@@ -218,6 +245,7 @@ def next_video(
     confirmed: bool | None = Query(default=None),
     ready: bool | None = Query(default=None),
     sort: str = Query(default="shuffle"),
+    shuffle_seed: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> dict:
     """Return the ID of the next video matching the same filters as ``GET /videos``.
@@ -236,7 +264,9 @@ def next_video(
         "last_watched": desc(Video.last_watched_at),
     }
     if sort == "shuffle":
-        statement: Select[tuple[Video]] = select(Video).order_by(text("RANDOM()"))
+        statement: Select[tuple[Video]] = select(Video).order_by(
+            _shuffle_order(shuffle_seed)
+        )
     else:
         order_by = ordering.get(sort, desc(Video.added_at))
         statement = select(Video).order_by(order_by)

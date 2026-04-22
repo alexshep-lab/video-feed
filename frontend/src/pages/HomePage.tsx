@@ -51,6 +51,18 @@ export default function HomePage() {
   // Filters state
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("shuffle");
+  // Stable seed for paginated shuffle. Without it, the server's
+  // `ORDER BY RANDOM()` re-shuffles every page — infinite-scroll loses
+  // ~30% of matches to cross-page duplicates. Regenerated each time the
+  // user enters shuffle mode (including the initial mount).
+  const [shuffleSeed, setShuffleSeed] = useState<number>(() =>
+    Math.floor(Math.random() * 2_000_000_000) + 1,
+  );
+  useEffect(() => {
+    if (sort === "shuffle") {
+      setShuffleSeed(Math.floor(Math.random() * 2_000_000_000) + 1);
+    }
+  }, [sort]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"any" | "all">("any");
   const [tagSearch, setTagSearch] = useState("");
@@ -83,7 +95,7 @@ export default function HomePage() {
     setPage(0);
     setVideos([]);
     setHasMore(true);
-  }, [q, sort, selectedTags, tagMode, codec, library, favoriteFilter, mode, reviewFilter, readyOnly]);
+  }, [q, sort, shuffleSeed, selectedTags, tagMode, codec, library, favoriteFilter, mode, reviewFilter, readyOnly]);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +105,7 @@ export default function HomePage() {
       setLoadingMore(true);
     }
     const params: VideoFilters = { sort, limit: PAGE_SIZE, offset: page * PAGE_SIZE };
+    if (sort === "shuffle") params.shuffle_seed = shuffleSeed;
     if (q) params.q = q;
     if (selectedTags.length > 0) {
       params.tags = selectedTags;
@@ -129,7 +142,7 @@ export default function HomePage() {
       });
 
     return () => { cancelled = true; };
-  }, [q, sort, selectedTags, tagMode, codec, library, favoriteFilter, mode, reviewFilter, readyOnly, page]);
+  }, [q, sort, shuffleSeed, selectedTags, tagMode, codec, library, favoriteFilter, mode, reviewFilter, readyOnly, page]);
 
   useEffect(() => {
     if (loading || loadingMore || !hasMore) return;
