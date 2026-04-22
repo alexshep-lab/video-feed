@@ -291,6 +291,28 @@ export default function MaintenancePage() {
     }
   }
 
+  // Inline "recycle" — shared helper for candidate-list rows where the
+  // user wants to drop a video right from the maintenance list instead of
+  // jumping to the watch page just to delete.
+  const [recyclingId, setRecyclingId] = useState<string | null>(null);
+
+  async function handleRecycleInline(
+    video: VideoItem,
+    refresh: () => unknown | Promise<unknown>,
+  ) {
+    if (!confirm(
+      `Переместить в Корзину?\n${video.original_filename}\n\nФайл уйдёт в Recycle Bin, ряд в БД будет soft-deleted.`
+    )) return;
+    setRecyclingId(video.id);
+    try {
+      const r = await deleteVideo(video.id, false, true);
+      if (r.move_error) alert(`Не удалось: ${r.move_error}`);
+      await refresh();
+    } finally {
+      setRecyclingId(null);
+    }
+  }
+
   // Missing files — DB rows whose source file has vanished
   const [missing, setMissing] = useState<MissingFileItem[]>([]);
   const [missingLoading, setMissingLoading] = useState(false);
@@ -1516,6 +1538,14 @@ export default function MaintenancePage() {
                         >
                           {convertingId === video.id ? "Queuing..." : "Convert This Video"}
                         </button>
+                        <button
+                          onClick={() => handleRecycleInline(video, loadConvertCandidates)}
+                          disabled={recyclingId === video.id}
+                          className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Move file to Recycle Bin"
+                        >
+                          {recyclingId === video.id ? "Recycling..." : "🗑 Recycle"}
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -2489,6 +2519,14 @@ export default function MaintenancePage() {
                           className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {paletteGeneratingId === video.id ? "Queuing..." : "Generate Palette"}
+                        </button>
+                        <button
+                          onClick={() => handleRecycleInline(video, loadPaletteCandidates)}
+                          disabled={recyclingId === video.id}
+                          className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Move file to Recycle Bin"
+                        >
+                          {recyclingId === video.id ? "Recycling..." : "🗑 Recycle"}
                         </button>
                       </div>
                     </div>
