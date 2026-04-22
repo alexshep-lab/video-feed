@@ -48,6 +48,9 @@ import {
   fetchMissingFiles,
   purgeMissingFiles,
   MissingFileItem,
+  fetchShortVideos,
+  purgeShortVideos,
+  ShortVideoItem,
   fetchOrphans,
   retryOrphan,
   retryAllOrphans,
@@ -245,6 +248,48 @@ export default function MaintenancePage() {
   const [palettePage, setPalettePage] = useState(0);
   const [paletteSort, setPaletteSort] = useState<PaletteSort>("name");
   const [paletteLoading, setPaletteLoading] = useState(false);
+
+  // Short videos — duration-based purge (default 7 min = 420 s)
+  const [shortMinutes, setShortMinutes] = useState<number>(7);
+  const [shortSeconds, setShortSeconds] = useState<number>(0);
+  const [shortItems, setShortItems] = useState<ShortVideoItem[]>([]);
+  const [shortLoading, setShortLoading] = useState(false);
+  const [shortResult, setShortResult] = useState<string | null>(null);
+  const [shortPurging, setShortPurging] = useState(false);
+
+  const shortMaxSeconds = () => Math.max(1, shortMinutes * 60 + shortSeconds);
+
+  async function loadShortVideos() {
+    setShortLoading(true);
+    try {
+      const r = await fetchShortVideos(shortMaxSeconds());
+      setShortItems(r.items);
+      setShortResult(r.count === 0 ? "Коротких видео нет." : `Найдено: ${r.count}`);
+    } finally {
+      setShortLoading(false);
+    }
+  }
+
+  async function handlePurgeShort() {
+    if (shortItems.length === 0) return;
+    if (!confirm(
+      `Переместить ${shortItems.length} видео в Корзину (≤ ${shortMinutes}мин ${shortSeconds}сек)?\n` +
+      `Файлы уходят в Recycle Bin, ряды в БД жёстко удаляются. Отменить нельзя.`
+    )) return;
+    setShortPurging(true);
+    try {
+      const r = await purgeShortVideos(shortMaxSeconds());
+      const parts = [
+        `Recycled: ${r.recycled}`,
+        r.purged_no_file ? `no-file purged: ${r.purged_no_file}` : null,
+        r.still_locked ? `locked: ${r.still_locked}` : null,
+      ].filter(Boolean);
+      setShortResult(parts.join(" · "));
+      await loadShortVideos();
+    } finally {
+      setShortPurging(false);
+    }
+  }
 
   // Missing files — DB rows whose source file has vanished
   const [missing, setMissing] = useState<MissingFileItem[]>([]);
@@ -2150,6 +2195,79 @@ export default function MaintenancePage() {
                   >
                     {retryingOrphanId === v.id ? "Trying..." : "Retry Recycle"}
                   </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
+      {/* Short videos — duration-based Recycle Bin purge */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Short Videos</h2>
+        <p className="text-xs text-white/40">
+          Видео короче указанного порога. Файлы отправляются в <b>Корзину</b>,
+          ряды в БД жёстко удаляются (с кэшем превьюшек). Если файл залочен
+          (открыт стрим / внешний плеер) — пропускаем, ряд не трогаем.
+          NULL-длительности игнорируются — затронут только ряды с известной
+          продолжительностью.
+        </p>
+        <div className="flex items-center gap-3 flex-wrap text-sm">
+          <label className="flex items-center gap-2 text-xs text-white/50">
+            ≤
+            <input
+              type="number"
+              min={0}
+              max={999}
+              value={shortMinutes}
+              onChange={(e) => setShortMinutes(Math.max(0, Number(e.target.value) || 0))}
+              className="w-16 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-white/80"
+            />
+            мин
+            <input
+              type="number"
+              min={0}
+              max={59}
+              value={shortSeconds}
+              onChange={(e) => setShortSeconds(Math.min(59, Math.max(0, Number(e.target.value) || 0)))}
+              className="w-16 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-white/80"
+            />
+            сек
+          </label>
+          <button onClick={loadShortVideos} disabled={shortLoading} className={btnCls}>
+            {shortLoading ? "Scanning..." : `Find Short (${shortItems.length})`}
+          </button>
+          {shortItems.length > 0 && (
+            <button
+              onClick={handlePurgeShort}
+              disabled={shortPurging}
+              className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {shortPurging ? "Recycling..." : `Recycle ${shortItems.length} videos`}
+            </button>
+          )}
+          {shortResult && <span className="text-xs text-white/60">{shortResult}</span>}
+        </div>
+
+        {shortItems.length > 0 && (
+          <div className="space-y-1.5 max-h-96 overflow-y-auto">
+            {shortItems.map((v) => (
+              <div
+                key={v.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] p-2 text-xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-white/80">{v.original_filename}</p>
+                  <p className="truncate text-white/40" title={v.original_path}>{v.original_path}</p>
+                </div>
+                <div className="shrink-0 text-right text-white/50">
+                  <span className="text-white/70">
+                    {v.duration ? formatDuration(v.duration) : "?"}
+                  </span>
+                  {" · "}
+                  <span>{formatFileSize(v.file_size)}</span>
                 </div>
               </div>
             ))}

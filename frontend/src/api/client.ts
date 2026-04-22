@@ -421,6 +421,39 @@ export async function purgeMissingFiles(): Promise<{ purged: number }> {
   return r.json();
 }
 
+// ---- Short videos (duration-based purge) ----
+
+export type ShortVideoItem = {
+  id: string;
+  title: string;
+  original_filename: string;
+  original_path: string;
+  duration: number | null;
+  file_size: number;
+};
+
+export async function fetchShortVideos(maxSeconds: number): Promise<{
+  count: number;
+  max_seconds: number;
+  items: ShortVideoItem[];
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/short-videos?max_seconds=${maxSeconds}`);
+  return r.json();
+}
+
+export async function purgeShortVideos(maxSeconds: number): Promise<{
+  recycled: number;
+  still_locked: number;
+  purged_no_file: number;
+  max_seconds: number;
+  errors: { id: string; path: string; error: string }[];
+}> {
+  const r = await fetch(`${API_BASE}/maintenance/short-videos/purge?max_seconds=${maxSeconds}`, {
+    method: "POST",
+  });
+  return r.json();
+}
+
 // ---- Tag normalization ----
 
 export type TagNormalizePlan = {
