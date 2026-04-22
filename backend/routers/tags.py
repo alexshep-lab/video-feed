@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import Tag, video_tags
+from ..models import Tag, Video, video_tags
 from ..schemas import TagCreate, TagOut
 
 
@@ -14,9 +14,12 @@ router = APIRouter(prefix="/tags", tags=["tags"])
 
 @router.get("", response_model=list[TagOut])
 def list_tags(db: Session = Depends(get_db)) -> list[TagOut]:
+    # Count only links to live videos — soft-deleted rows shouldn't inflate
+    # the tag count or the count shown in the sidebar filter.
     rows = db.execute(
-        select(Tag.id, Tag.name, func.count(video_tags.c.video_id))
+        select(Tag.id, Tag.name, func.count(Video.id))
         .outerjoin(video_tags, Tag.id == video_tags.c.tag_id)
+        .outerjoin(Video, (Video.id == video_tags.c.video_id) & Video.deleted_at.is_(None))
         .group_by(Tag.id, Tag.name)
         .order_by(Tag.name)
     ).all()

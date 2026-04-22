@@ -36,7 +36,14 @@ export default function HomePage() {
   const [addingFolder, setAddingFolder] = useState(false);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const [tileSize, setTileSize] = useState(260);
+  const [tileSize, setTileSize] = useState(() => {
+    const stored = localStorage.getItem("videofeed.tileSize");
+    const n = stored ? Number(stored) : NaN;
+    return Number.isFinite(n) && n >= 180 && n <= 420 ? n : 260;
+  });
+  useEffect(() => {
+    localStorage.setItem("videofeed.tileSize", String(tileSize));
+  }, [tileSize]);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
   const [readyOnly, setReadyOnly] = useState(false);

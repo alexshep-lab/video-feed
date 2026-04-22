@@ -16,9 +16,14 @@ router = APIRouter(prefix="/libraries", tags=["libraries"])
 
 @router.get("", response_model=list[LibraryFolderOut])
 def list_libraries(db: Session = Depends(get_db)) -> list[LibraryFolderOut]:
+    # Exclude soft-deleted videos from the count — otherwise the sidebar
+    # number is higher than what the library filter actually returns.
     rows = db.execute(
         select(LibraryFolder, func.count(Video.id))
-        .outerjoin(Video, Video.library_path == LibraryFolder.path)
+        .outerjoin(
+            Video,
+            (Video.library_path == LibraryFolder.path) & Video.deleted_at.is_(None),
+        )
         .group_by(LibraryFolder.id)
         .order_by(LibraryFolder.path)
     ).all()
@@ -76,10 +81,13 @@ def add_library(
 
     db.commit()
 
-    # Return all folders with counts
+    # Return all folders with counts (live videos only).
     rows = db.execute(
         select(LibraryFolder, func.count(Video.id))
-        .outerjoin(Video, Video.library_path == LibraryFolder.path)
+        .outerjoin(
+            Video,
+            (Video.library_path == LibraryFolder.path) & Video.deleted_at.is_(None),
+        )
         .group_by(LibraryFolder.id)
         .order_by(LibraryFolder.path)
     ).all()
@@ -113,7 +121,12 @@ def update_library(
         folder.is_incoming = payload.is_incoming
     db.commit()
     db.refresh(folder)
-    count = db.scalar(select(func.count(Video.id)).where(Video.library_path == folder.path)) or 0
+    count = db.scalar(
+        select(func.count(Video.id)).where(
+            Video.library_path == folder.path,
+            Video.deleted_at.is_(None),
+        )
+    ) or 0
     return LibraryFolderOut(
         id=folder.id, path=folder.path, enabled=folder.enabled,
         is_incoming=folder.is_incoming,

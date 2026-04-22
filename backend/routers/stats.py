@@ -126,11 +126,13 @@ def get_stats(db: Session = Depends(get_db)) -> dict:
         .limit(30)
     ).all()
 
-    # Popular tags by total views
+    # Popular tags by total views. Exclude soft-deleted rows so the stats
+    # match what the library actually shows.
     tag_stats = db.execute(
         select(Tag.name, func.sum(Video.view_count), func.count(Video.id))
         .join(video_tags, Tag.id == video_tags.c.tag_id)
         .join(Video, Video.id == video_tags.c.video_id)
+        .where(Video.deleted_at.is_(None))
         .group_by(Tag.name)
         .having(func.sum(Video.view_count) > 0)
         .order_by(desc(func.sum(Video.view_count)))

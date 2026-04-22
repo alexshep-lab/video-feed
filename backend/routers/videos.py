@@ -323,19 +323,27 @@ def get_filter_options(db: Session = Depends(get_db)) -> FilterOptions:
     ).all()
     codecs = [row[0] for row in codec_rows]
 
-    # Tags with counts
+    # Tags with counts. Must join through to Video and exclude soft-deleted
+    # rows — otherwise the sidebar number (e.g. "strap 187") diverges from
+    # the actual filtered list ("127 videos"), because soft-deleted rows
+    # still have their video_tags linkage but don't show up under
+    # ``GET /videos?tags=...``.
     tag_rows = db.execute(
-        select(Tag.id, Tag.name, func.count(video_tags.c.video_id))
+        select(Tag.id, Tag.name, func.count(Video.id))
         .outerjoin(video_tags, Tag.id == video_tags.c.tag_id)
+        .outerjoin(Video, (Video.id == video_tags.c.video_id) & Video.deleted_at.is_(None))
         .group_by(Tag.id, Tag.name)
         .order_by(Tag.name)
     ).all()
     tags = [TagOut(id=row[0], name=row[1], video_count=row[2]) for row in tag_rows]
 
-    # Library folders with counts
+    # Library folders with counts — same deleted_at fix.
     folder_rows = db.execute(
         select(LibraryFolder, func.count(Video.id))
-        .outerjoin(Video, Video.library_path == LibraryFolder.path)
+        .outerjoin(
+            Video,
+            (Video.library_path == LibraryFolder.path) & Video.deleted_at.is_(None),
+        )
         .group_by(LibraryFolder.id)
         .order_by(LibraryFolder.path)
     ).all()
