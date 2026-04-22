@@ -291,6 +291,11 @@ export default function MaintenancePage() {
     }
   }
 
+  // Which quick-tool tile is currently expanded (exactly one at a time).
+  // null = all collapsed to tiles. Key matches the id= passed to
+  // MaybeCollapsed below.
+  const [expandedTool, setExpandedTool] = useState<string | null>(null);
+
   // Inline "recycle" — shared helper for candidate-list rows where the
   // user wants to drop a video right from the maintenance list instead of
   // jumping to the watch page just to delete.
@@ -1100,61 +1105,9 @@ export default function MaintenancePage() {
     <div className="space-y-10">
       <h1 className="text-3xl font-semibold text-white">Maintenance</h1>
 
-      {/* Duplicates */}
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-white/80">Duplicates</h2>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button className={tabCls(dupMode === "exact")} onClick={() => setDupMode("exact")}>Exact</button>
-          <button className={tabCls(dupMode === "perceptual")} onClick={() => setDupMode("perceptual")}>Perceptual</button>
-
-          {dupMode === "perceptual" && (
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-white/50">Threshold:</label>
-              <input
-                type="range"
-                min={1}
-                max={20}
-                value={threshold}
-                onChange={(e) => setThreshold(Number(e.target.value))}
-                className="w-28 accent-amber-500"
-              />
-              <span className="text-sm text-white/60 w-4">{threshold}</span>
-              <button onClick={handleComputeHashes} className={btnCls}>
-                Compute Hashes
-              </button>
-              {hashResult && <span className="text-xs text-white/40">{hashResult}</span>}
-            </div>
-          )}
-
-          <button onClick={loadDuplicates} disabled={dupLoading} className={btnCls}>
-            {dupLoading ? "Loading..." : "Find Duplicates"}
-          </button>
-        </div>
-
-        {!dupLoading && dupGroups.length > 0 && (
-          <div className="space-y-3">
-            <div className="flex items-center gap-3">
-              <p className="text-sm text-white/40">{dupGroups.length} group{dupGroups.length !== 1 ? "s" : ""} found</p>
-              <SpoilerToggle
-                open={showDupResults}
-                onClick={() => setShowDupResults((v) => !v)}
-                label="duplicate groups"
-                count={dupGroups.length}
-              />
-            </div>
-            {showDupResults && (
-              <div className="space-y-4">
-                {dupGroups.map((group, i) => (
-                  <DuplicateGroup key={i} group={group} onTrash={handleTrash} onRecycle={handleRecycle} />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </section>
-
-      <hr className="border-white/10" />
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.22em] text-white/40">
+        Heavy Operations
+      </h2>
 
       {/* Compression */}
       <section className="space-y-4">
@@ -1855,8 +1808,80 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.22em] text-white/40">
+        Quick Tools
+      </h2>
 
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+
+      <MaybeCollapsed
+        id="duplicates"
+        title="Duplicates"
+        hint="Exact (head+tail fingerprint) or perceptual hash clusters"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Duplicates</h2>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button className={tabCls(dupMode === "exact")} onClick={() => setDupMode("exact")}>Exact</button>
+          <button className={tabCls(dupMode === "perceptual")} onClick={() => setDupMode("perceptual")}>Perceptual</button>
+
+          {dupMode === "perceptual" && (
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-white/50">Threshold:</label>
+              <input
+                type="range"
+                min={1}
+                max={20}
+                value={threshold}
+                onChange={(e) => setThreshold(Number(e.target.value))}
+                className="w-28 accent-amber-500"
+              />
+              <span className="text-sm text-white/60 w-4">{threshold}</span>
+              <button onClick={handleComputeHashes} className={btnCls}>
+                Compute Hashes
+              </button>
+              {hashResult && <span className="text-xs text-white/40">{hashResult}</span>}
+            </div>
+          )}
+
+          <button onClick={loadDuplicates} disabled={dupLoading} className={btnCls}>
+            {dupLoading ? "Loading..." : "Find Duplicates"}
+          </button>
+        </div>
+
+        {!dupLoading && dupGroups.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-white/40">{dupGroups.length} group{dupGroups.length !== 1 ? "s" : ""} found</p>
+              <SpoilerToggle
+                open={showDupResults}
+                onClick={() => setShowDupResults((v) => !v)}
+                label="duplicate groups"
+                count={dupGroups.length}
+              />
+            </div>
+            {showDupResults && (
+              <div className="space-y-4">
+                {dupGroups.map((group, i) => (
+                  <DuplicateGroup key={i} group={group} onTrash={handleTrash} onRecycle={handleRecycle} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      </MaybeCollapsed>
+
+      <MaybeCollapsed
+        id="archive"
+        title="Compress Archive"
+        hint="Recycle originals moved to big_archive_dir after FHD compression"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Compress archive — post-compression originals in big_archive_dir */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Compress Archive</h2>
@@ -1959,8 +1984,15 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      </MaybeCollapsed>
 
+      <MaybeCollapsed
+        id="screens"
+        title="Screenshot / Pack Folders"
+        hint="Recycle *_scr, Screens/, _SCREENSHOTS/ dirs"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Screenshot / pack folder cleanup — physical delete from disk */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Screenshot / Pack Folders</h2>
@@ -2034,8 +2066,15 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      </MaybeCollapsed>
 
+      <MaybeCollapsed
+        id="tagnorm"
+        title="Tag Normalizer"
+        hint="Fold count/site suffixes, drop service-folder tags"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Tag normalizer — fold count/site suffixes, drop service folders */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Tag Normalizer</h2>
@@ -2141,8 +2180,15 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      </MaybeCollapsed>
 
+      <MaybeCollapsed
+        id="similar"
+        title="Similar Tags"
+        hint="Fingerprint + fuzzy clusters; pick canonical and merge"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Similar Tags — fingerprint + fuzzy clusters, manual merge */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Similar Tags (dedup)</h2>
@@ -2298,8 +2344,15 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      </MaybeCollapsed>
 
+      <MaybeCollapsed
+        id="extract"
+        title="Extract Tags from Filenames"
+        hint="Studio prefixes, actor names, quality/codec markers"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Tag extraction from filenames */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Extract Tags from Filenames</h2>
@@ -2397,8 +2450,15 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      </MaybeCollapsed>
 
+      <MaybeCollapsed
+        id="orphans"
+        title="Locked / Orphan Files"
+        hint="Soft-deleted rows whose file is still on disk"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Locked / orphan files — soft-deleted DB row, file still on disk */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Locked / Orphan Files</h2>
@@ -2447,8 +2507,15 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      </MaybeCollapsed>
 
+      <MaybeCollapsed
+        id="short"
+        title="Short Videos"
+        hint="Recycle videos under N min : NN sec threshold"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Short videos — duration-based Recycle Bin purge */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Short Videos</h2>
@@ -2520,8 +2587,15 @@ export default function MaintenancePage() {
         )}
       </section>
 
-      <hr className="border-white/10" />
+      </MaybeCollapsed>
 
+      <MaybeCollapsed
+        id="missing"
+        title="Missing Files"
+        hint="Active rows whose original_path no longer exists on disk"
+        expandedId={expandedTool}
+        setExpandedId={setExpandedTool}
+      >
       {/* Missing files — DB rows whose source file has vanished from disk */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Missing Files</h2>
@@ -2562,11 +2636,64 @@ export default function MaintenancePage() {
           </div>
         )}
       </section>
+      </MaybeCollapsed>
+
+      </div>
 
       <hr className="border-white/10" />
 
       <NotesPanel />
     </div>
+  );
+}
+
+/**
+ * Collapsible tile for the Quick Tools grid. Collapsed — a clickable
+ * card with title + one-line hint. Expanded — spans the whole grid row
+ * (``col-span-full``) and renders the original section unchanged. Only
+ * one tile is expanded at a time: the parent owns the ``expandedId``
+ * state and MaybeCollapsed just reacts to it.
+ */
+function MaybeCollapsed({
+  id,
+  title,
+  hint,
+  expandedId,
+  setExpandedId,
+  children,
+}: {
+  id: string;
+  title: string;
+  hint: string;
+  expandedId: string | null;
+  setExpandedId: (v: string | null) => void;
+  children: React.ReactNode;
+}) {
+  const expanded = expandedId === id;
+  if (expanded) {
+    return (
+      <div className="col-span-full rounded-2xl border border-accent/30 bg-white/[0.04] p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-widest text-white/35">{title}</span>
+          <button
+            onClick={() => setExpandedId(null)}
+            className="rounded-lg border border-white/10 px-3 py-1 text-xs text-white/60 hover:bg-white/5 hover:text-white"
+          >
+            Collapse ↑
+          </button>
+        </div>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <button
+      onClick={() => setExpandedId(id)}
+      className="rounded-2xl border border-white/10 bg-white/[0.02] p-4 text-left transition hover:border-accent/30 hover:bg-white/[0.05]"
+    >
+      <h3 className="text-base font-semibold text-white/85">{title}</h3>
+      <p className="mt-1 text-xs text-white/45">{hint}</p>
+    </button>
   );
 }
 
