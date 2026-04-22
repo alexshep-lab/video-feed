@@ -2562,6 +2562,70 @@ export default function MaintenancePage() {
           </div>
         )}
       </section>
+
+      <hr className="border-white/10" />
+
+      <NotesPanel />
     </div>
+  );
+}
+
+/**
+ * Free-form scratchpad for ideas / bugs / reminders. Persists in
+ * localStorage under a single key — no backend round-trip, so it's
+ * single-device only (fine for a self-hosted one-user app).
+ *
+ * Auto-saves with a small debounce so you can't accidentally lose a
+ * line by closing the tab mid-typing.
+ */
+function NotesPanel() {
+  const STORAGE_KEY = "videofeed.notes";
+  const [notes, setNotes] = useState<string>(
+    () => localStorage.getItem(STORAGE_KEY) ?? "",
+  );
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      localStorage.setItem(STORAGE_KEY, notes);
+      setSavedAt(new Date().toLocaleTimeString());
+    }, 500);
+    return () => window.clearTimeout(t);
+  }, [notes]);
+
+  function handleClear() {
+    if (!notes) return;
+    if (!confirm("Очистить все заметки? Отменить нельзя.")) return;
+    setNotes("");
+    localStorage.removeItem(STORAGE_KEY);
+    setSavedAt(null);
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold text-white/80">Notes</h2>
+        <div className="flex items-center gap-3 text-xs text-white/40">
+          {savedAt && <span>Autosaved · {savedAt}</span>}
+          <button
+            onClick={handleClear}
+            disabled={!notes}
+            className="rounded-lg border border-white/10 px-3 py-1 text-white/50 hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-white/40">
+        Локальный блокнот — идеи, баги, заметки. Сохраняется в localStorage
+        этого браузера (не на сервере). Авто-сохранение каждые 500&nbsp;мс.
+      </p>
+      <textarea
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder={"Например:\n- [ ] починить shuffle для подтем\n- странное поведение при..."}
+        className="min-h-[180px] w-full resize-y rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-sm text-white/85 placeholder:text-white/25 focus:border-accent/40 focus:outline-none"
+      />
+    </section>
   );
 }
