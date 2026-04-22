@@ -1642,6 +1642,221 @@ export default function MaintenancePage() {
 
       <hr className="border-white/10" />
 
+      {/* Video palettes (contact sheets) — batch generation */}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold text-white/80">Video Palettes</h2>
+
+        {paletteStatus && (
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3 text-sm">
+            <div className="flex flex-wrap gap-6">
+              <div>
+                <span className="text-white/40">Queue: </span>
+                <span className="text-white">{paletteStatus.queue_size}</span>
+              </div>
+              <div>
+                <span className="text-white/40">Worker: </span>
+                <span className={paletteStatus.worker_running ? "text-green-400" : "text-white/50"}>
+                  {paletteStatus.worker_running ? "Running" : "Idle"}
+                </span>
+              </div>
+              <div>
+                <span className="text-white/40">Done: </span>
+                <span className="text-white">{paletteStatus.batch_completed_jobs}/{paletteStatus.batch_total_jobs || 0}</span>
+              </div>
+              <div>
+                <span className="text-white/40">Failed: </span>
+                <span className="text-white">{paletteStatus.batch_failed_jobs}</span>
+              </div>
+              <div>
+                <span className="text-white/40">Palette not yet built: </span>
+                <span className="text-white">{paletteMissing ?? "?"}</span>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs text-white/45">
+                <span>Overall progress</span>
+                <span>{Math.round(paletteStatus.overall_progress)}%</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full bg-accent transition-all"
+                  style={{ width: `${paletteStatus.overall_progress}%` }}
+                />
+              </div>
+            </div>
+
+            {paletteStatus.current_video_id && (
+              <div className="space-y-1">
+                <div className="text-xs text-white/40">Processing now</div>
+                <div className="text-sm text-white/80">{paletteStatus.current_video_title ?? paletteStatus.current_video_id}</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={handlePaletteGenerateAll} className={btnCls}>
+            Generate All Missing ({paletteMissing ?? "?"})
+          </button>
+          <button
+            onClick={handlePaletteSelected}
+            disabled={paletteSelected.size === 0}
+            className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Generate Selected First ({paletteSelected.size})
+          </button>
+          <button onClick={selectAllPalette} className={btnCls}>Select All</button>
+          <button onClick={clearPaletteSelection} className={btnCls}>Clear Selection</button>
+          <button onClick={() => { loadPaletteStatus(); loadPaletteMissingCount(); loadPaletteCandidates(); }} className={btnCls}>
+            Refresh
+          </button>
+          {paletteStatus && (paletteStatus.queue_size > 0 || paletteStatus.current_video_id) && (
+            <button
+              onClick={handlePaletteStop}
+              className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition"
+            >
+              Stop
+            </button>
+          )}
+        </div>
+
+        <p className="text-xs text-white/40">
+          Generates 16-frame contact sheets so videos become reviewable without playback.
+          Uses NVDEC decode when available, otherwise CPU.
+        </p>
+        {paletteResult && <p className="text-xs text-white/40">{paletteResult}</p>}
+
+        {/* Sort + spoiler toggle row */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <SpoilerToggle
+            open={showPaletteList}
+            onClick={() => setShowPaletteList((v) => !v)}
+            label="candidate list"
+            count={paletteTotal || paletteMissing || 0}
+          />
+          {showPaletteList && (
+            <>
+              <label className="text-xs text-white/45">Sort by:</label>
+              <select
+                value={paletteSort}
+                onChange={(e) => { setPaletteSort(e.target.value as PaletteSort); setPalettePage(0); }}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white focus:outline-none focus:border-accent/50"
+              >
+                <option value="name">Name</option>
+                <option value="size_desc">Largest first</option>
+                <option value="size_asc">Smallest first</option>
+                <option value="duration_desc">Longest first</option>
+                <option value="duration_asc">Shortest first</option>
+              </select>
+              {paletteLoading && <span className="text-xs text-white/40">Loading...</span>}
+            </>
+          )}
+        </div>
+
+        {showPaletteList && paletteItems.length === 0 && !paletteLoading && (
+          <p className="text-sm text-white/40">No videos missing a palette.</p>
+        )}
+        {showPaletteList && paletteItems.length > 0 && (
+          <div className="space-y-3">
+            {paletteItems.map((video) => {
+              const isSelected = paletteSelected.has(video.id);
+              return (
+                <div
+                  key={video.id}
+                  className={`rounded-2xl border p-4 transition ${
+                    isSelected ? "border-accent/50 bg-accent/[0.06]" : "border-white/10 bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex flex-col gap-4 lg:flex-row">
+                    <div className="flex shrink-0 items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => togglePaletteSelected(video.id)}
+                        className="mt-1 h-5 w-5 accent-amber-500 cursor-pointer"
+                      />
+                      <div className="relative h-28 w-full overflow-hidden rounded-2xl border border-white/10 bg-white/5 lg:w-52">
+                        <img
+                          src={video.thumbnail_url}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          onError={(e) => {
+                            (e.currentTarget as HTMLImageElement).style.display = "none";
+                          }}
+                        />
+                        <div className="absolute bottom-2 right-2 rounded-full bg-black/65 px-2.5 py-1 text-xs text-white">
+                          {formatDuration(video.duration)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex min-w-0 flex-1 flex-col gap-3">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="min-w-0 space-y-1">
+                          <p className="truncate text-sm font-medium text-white">{video.original_filename}</p>
+                          <p className="truncate text-xs text-white/35">{video.original_path}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-white/45 lg:justify-end">
+                          <span>{formatFileSize(video.file_size)}</span>
+                          <span>{video.width ?? "?"}x{video.height ?? "?"}</span>
+                          <span>{video.codec ?? "unknown"}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button
+                          onClick={() => handlePaletteOne(video)}
+                          disabled={paletteGeneratingId === video.id}
+                          className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {paletteGeneratingId === video.id ? "Queuing..." : "Generate Palette"}
+                        </button>
+                        <button
+                          onClick={() => handleRecycleInline(video, loadPaletteCandidates)}
+                          disabled={recyclingId === video.id}
+                          className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Move file to Recycle Bin"
+                        >
+                          {recyclingId === video.id ? "Recycling..." : "🗑 Recycle"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {showPaletteList && paletteTotal > PALETTE_PAGE_SIZE && (
+          <div className="flex items-center justify-between gap-3 pt-2">
+            <button
+              onClick={() => setPalettePage((p) => Math.max(0, p - 1))}
+              disabled={palettePage === 0 || paletteLoading}
+              className={btnCls + " disabled:opacity-40 disabled:cursor-not-allowed"}
+            >
+              &larr; Prev
+            </button>
+            <span className="text-xs text-white/45">
+              Page {palettePage + 1} / {Math.max(1, Math.ceil(paletteTotal / PALETTE_PAGE_SIZE))}
+              {" • "}
+              Showing {palettePage * PALETTE_PAGE_SIZE + 1}-
+              {Math.min((palettePage + 1) * PALETTE_PAGE_SIZE, paletteTotal)} of {paletteTotal}
+            </span>
+            <button
+              onClick={() => setPalettePage((p) => p + 1)}
+              disabled={(palettePage + 1) * PALETTE_PAGE_SIZE >= paletteTotal || paletteLoading}
+              className={btnCls + " disabled:opacity-40 disabled:cursor-not-allowed"}
+            >
+              Next &rarr;
+            </button>
+          </div>
+        )}
+      </section>
+
+      <hr className="border-white/10" />
+
       {/* Compress archive — post-compression originals in big_archive_dir */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold text-white/80">Compress Archive</h2>
@@ -2344,221 +2559,6 @@ export default function MaintenancePage() {
                 <p className="truncate text-white/40" title={v.original_path}>{v.original_path}</p>
               </div>
             ))}
-          </div>
-        )}
-      </section>
-
-      <hr className="border-white/10" />
-
-      {/* Video palettes (contact sheets) — batch generation */}
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-white/80">Video Palettes</h2>
-
-        {paletteStatus && (
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3 text-sm">
-            <div className="flex flex-wrap gap-6">
-              <div>
-                <span className="text-white/40">Queue: </span>
-                <span className="text-white">{paletteStatus.queue_size}</span>
-              </div>
-              <div>
-                <span className="text-white/40">Worker: </span>
-                <span className={paletteStatus.worker_running ? "text-green-400" : "text-white/50"}>
-                  {paletteStatus.worker_running ? "Running" : "Idle"}
-                </span>
-              </div>
-              <div>
-                <span className="text-white/40">Done: </span>
-                <span className="text-white">{paletteStatus.batch_completed_jobs}/{paletteStatus.batch_total_jobs || 0}</span>
-              </div>
-              <div>
-                <span className="text-white/40">Failed: </span>
-                <span className="text-white">{paletteStatus.batch_failed_jobs}</span>
-              </div>
-              <div>
-                <span className="text-white/40">Palette not yet built: </span>
-                <span className="text-white">{paletteMissing ?? "?"}</span>
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs text-white/45">
-                <span>Overall progress</span>
-                <span>{Math.round(paletteStatus.overall_progress)}%</span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                <div
-                  className="h-full rounded-full bg-accent transition-all"
-                  style={{ width: `${paletteStatus.overall_progress}%` }}
-                />
-              </div>
-            </div>
-
-            {paletteStatus.current_video_id && (
-              <div className="space-y-1">
-                <div className="text-xs text-white/40">Processing now</div>
-                <div className="text-sm text-white/80">{paletteStatus.current_video_title ?? paletteStatus.current_video_id}</div>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="flex items-center gap-3 flex-wrap">
-          <button onClick={handlePaletteGenerateAll} className={btnCls}>
-            Generate All Missing ({paletteMissing ?? "?"})
-          </button>
-          <button
-            onClick={handlePaletteSelected}
-            disabled={paletteSelected.size === 0}
-            className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Generate Selected First ({paletteSelected.size})
-          </button>
-          <button onClick={selectAllPalette} className={btnCls}>Select All</button>
-          <button onClick={clearPaletteSelection} className={btnCls}>Clear Selection</button>
-          <button onClick={() => { loadPaletteStatus(); loadPaletteMissingCount(); loadPaletteCandidates(); }} className={btnCls}>
-            Refresh
-          </button>
-          {paletteStatus && (paletteStatus.queue_size > 0 || paletteStatus.current_video_id) && (
-            <button
-              onClick={handlePaletteStop}
-              className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition"
-            >
-              Stop
-            </button>
-          )}
-        </div>
-
-        <p className="text-xs text-white/40">
-          Generates 16-frame contact sheets so videos become reviewable without playback.
-          Uses NVDEC decode when available, otherwise CPU.
-        </p>
-        {paletteResult && <p className="text-xs text-white/40">{paletteResult}</p>}
-
-        {/* Sort + spoiler toggle row */}
-        <div className="flex items-center gap-3 flex-wrap">
-          <SpoilerToggle
-            open={showPaletteList}
-            onClick={() => setShowPaletteList((v) => !v)}
-            label="candidate list"
-            count={paletteTotal || paletteMissing || 0}
-          />
-          {showPaletteList && (
-            <>
-              <label className="text-xs text-white/45">Sort by:</label>
-              <select
-                value={paletteSort}
-                onChange={(e) => { setPaletteSort(e.target.value as PaletteSort); setPalettePage(0); }}
-                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white focus:outline-none focus:border-accent/50"
-              >
-                <option value="name">Name</option>
-                <option value="size_desc">Largest first</option>
-                <option value="size_asc">Smallest first</option>
-                <option value="duration_desc">Longest first</option>
-                <option value="duration_asc">Shortest first</option>
-              </select>
-              {paletteLoading && <span className="text-xs text-white/40">Loading...</span>}
-            </>
-          )}
-        </div>
-
-        {showPaletteList && paletteItems.length === 0 && !paletteLoading && (
-          <p className="text-sm text-white/40">No videos missing a palette.</p>
-        )}
-        {showPaletteList && paletteItems.length > 0 && (
-          <div className="space-y-3">
-            {paletteItems.map((video) => {
-              const isSelected = paletteSelected.has(video.id);
-              return (
-                <div
-                  key={video.id}
-                  className={`rounded-2xl border p-4 transition ${
-                    isSelected ? "border-accent/50 bg-accent/[0.06]" : "border-white/10 bg-white/[0.04]"
-                  }`}
-                >
-                  <div className="flex flex-col gap-4 lg:flex-row">
-                    <div className="flex shrink-0 items-start gap-3">
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => togglePaletteSelected(video.id)}
-                        className="mt-1 h-5 w-5 accent-amber-500 cursor-pointer"
-                      />
-                      <div className="relative h-28 w-full overflow-hidden rounded-2xl border border-white/10 bg-white/5 lg:w-52">
-                        <img
-                          src={video.thumbnail_url}
-                          alt=""
-                          className="h-full w-full object-cover"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).style.display = "none";
-                          }}
-                        />
-                        <div className="absolute bottom-2 right-2 rounded-full bg-black/65 px-2.5 py-1 text-xs text-white">
-                          {formatDuration(video.duration)}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex min-w-0 flex-1 flex-col gap-3">
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                        <div className="min-w-0 space-y-1">
-                          <p className="truncate text-sm font-medium text-white">{video.original_filename}</p>
-                          <p className="truncate text-xs text-white/35">{video.original_path}</p>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-white/45 lg:justify-end">
-                          <span>{formatFileSize(video.file_size)}</span>
-                          <span>{video.width ?? "?"}x{video.height ?? "?"}</span>
-                          <span>{video.codec ?? "unknown"}</span>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap justify-end gap-2">
-                        <button
-                          onClick={() => handlePaletteOne(video)}
-                          disabled={paletteGeneratingId === video.id}
-                          className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 transition disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {paletteGeneratingId === video.id ? "Queuing..." : "Generate Palette"}
-                        </button>
-                        <button
-                          onClick={() => handleRecycleInline(video, loadPaletteCandidates)}
-                          disabled={recyclingId === video.id}
-                          className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition disabled:cursor-not-allowed disabled:opacity-50"
-                          title="Move file to Recycle Bin"
-                        >
-                          {recyclingId === video.id ? "Recycling..." : "🗑 Recycle"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {showPaletteList && paletteTotal > PALETTE_PAGE_SIZE && (
-          <div className="flex items-center justify-between gap-3 pt-2">
-            <button
-              onClick={() => setPalettePage((p) => Math.max(0, p - 1))}
-              disabled={palettePage === 0 || paletteLoading}
-              className={btnCls + " disabled:opacity-40 disabled:cursor-not-allowed"}
-            >
-              &larr; Prev
-            </button>
-            <span className="text-xs text-white/45">
-              Page {palettePage + 1} / {Math.max(1, Math.ceil(paletteTotal / PALETTE_PAGE_SIZE))}
-              {" • "}
-              Showing {palettePage * PALETTE_PAGE_SIZE + 1}-
-              {Math.min((palettePage + 1) * PALETTE_PAGE_SIZE, paletteTotal)} of {paletteTotal}
-            </span>
-            <button
-              onClick={() => setPalettePage((p) => p + 1)}
-              disabled={(palettePage + 1) * PALETTE_PAGE_SIZE >= paletteTotal || paletteLoading}
-              className={btnCls + " disabled:opacity-40 disabled:cursor-not-allowed"}
-            >
-              Next &rarr;
-            </button>
           </div>
         )}
       </section>
