@@ -1,5 +1,21 @@
 from __future__ import annotations
 
+# A PyInstaller --noconsole Windows bundle has sys.stdout and sys.stderr
+# set to None. Anything that calls sys.stdout.isatty() — uvicorn's
+# DefaultFormatter, logging.StreamHandler with default stream, even some
+# stdlib output paths — crashes with AttributeError before our logging
+# config has a chance to run. Redirect both to devnull *first*, before
+# any third-party imports touch them. In source mode (sys.stdout = real
+# terminal) this block is a no-op.
+import os as _os
+import sys as _sys
+if getattr(_sys, "frozen", False):
+    if _sys.stdout is None:
+        _sys.stdout = open(_os.devnull, "w", encoding="utf-8", buffering=1)
+    if _sys.stderr is None:
+        _sys.stderr = open(_os.devnull, "w", encoding="utf-8", buffering=1)
+del _os, _sys
+
 import os
 import socket
 import sys
@@ -118,14 +134,26 @@ def main() -> None:
     # Pass the app object directly (not "backend.main:app") so uvicorn's
     # import-string machinery doesn't run inside the PyInstaller bundle —
     # that codepath is fragile when the package was extracted from _MEIPASS.
+    #
+    # When frozen: pass log_config=None so uvicorn doesn't run dictConfig
+    # against its own LOGGING_CONFIG. That config builds DefaultFormatter,
+    # which calls sys.stdout.isatty() during construction — even with our
+    # devnull fix above, PyInstaller logging has been a moving target across
+    # versions and we'd rather not depend on it. With log_config=None,
+    # uvicorn's loggers fall through to the root logger that
+    # backend.main._configure_logging() set up (StreamHandler + rotating
+    # server.log), so access logs and startup info still land in the file.
+    # Source mode keeps uvicorn's default colored output.
     from backend.main import app
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        reload=False,
-        timeout_graceful_shutdown=3,
-    )
+    uvicorn_kwargs: dict = {
+        "host": host,
+        "port": port,
+        "reload": False,
+        "timeout_graceful_shutdown": 3,
+    }
+    if getattr(sys, "frozen", False):
+        uvicorn_kwargs["log_config"] = None
+    uvicorn.run(app, **uvicorn_kwargs)
 
 
 if __name__ == "__main__":
