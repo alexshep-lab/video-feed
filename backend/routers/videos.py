@@ -819,7 +819,6 @@ def to_detail_item(request: Request, video: Video) -> VideoDetail:
         raw_stream_url=str(request.url_for("stream_raw_video", video_id=video.id)),
         hls_path=video.hls_path,
         hls_stream_url=hls_url,
-        tags=video.tags,
         tag_list=video.tag_list,
         thumbnail_url=str(request.url_for("stream_video_thumbnail", video_id=video.id)),
         preview_frame_template_url=str(

@@ -51,7 +51,6 @@ class VideoDetail(VideoBase):
     raw_stream_url: str
     hls_path: str | None
     hls_stream_url: str | None = None
-    tags: str | None
     thumbnail_url: str
     preview_frame_template_url: str
 

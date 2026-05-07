@@ -51,7 +51,6 @@ export type VideoItem = {
 export type VideoDetail = VideoItem & {
   original_path: string;
   hls_path: string | null;
-  tags: string | null;
 };
 
 export type VideoUpdate = {
