@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
 import socket
 import sys
+import threading
+import time
+import webbrowser
+from urllib.request import urlopen
 
 import uvicorn
 
@@ -10,6 +15,8 @@ from backend.config import get_settings
 
 DEFAULT_PORT = 47999
 PORT_RETRY_RANGE = 10  # try 47999..48008 inclusive
+HEALTH_POLL_TIMEOUT_S = 15.0
+HEALTH_POLL_INTERVAL_S = 0.25
 
 
 def _find_open_port(host: str, start: int, attempts: int) -> int | None:
@@ -45,6 +52,39 @@ def _write_port_file(port: int) -> None:
         pass
 
 
+def _wait_then_open_browser(url: str) -> None:
+    """Poll /health until the server responds, then open the default browser.
+
+    Run on a background thread so it doesn't block uvicorn's startup. Bails
+    silently after a timeout — if the server takes longer than that, the user
+    can hit the URL manually (we still printed it).
+    """
+    deadline = time.monotonic() + HEALTH_POLL_TIMEOUT_S
+    health_url = f"{url.rstrip('/')}/health"
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(health_url, timeout=1.0) as resp:
+                if resp.status == 200:
+                    webbrowser.open(url)
+                    return
+        except Exception:
+            pass
+        time.sleep(HEALTH_POLL_INTERVAL_S)
+
+
+def _should_open_browser() -> bool:
+    """True when running as a frozen desktop launch — never in dev.
+
+    Source-mode runs (``python run.py`` during dev) shouldn't pop a browser
+    on every restart. The frozen bundle is invoked by a desktop shortcut
+    where opening the UI is the whole point.
+    """
+    if getattr(sys, "frozen", False):
+        return True
+    # Manual override for testing the launcher logic in source.
+    return os.environ.get("VIDEOFEED_OPEN_BROWSER") == "1"
+
+
 def main() -> None:
     host = "127.0.0.1"
     port = _find_open_port(host, DEFAULT_PORT, PORT_RETRY_RANGE)
@@ -59,14 +99,28 @@ def main() -> None:
         print(f"Port {DEFAULT_PORT} was busy — falling back to {port}.")
 
     _write_port_file(port)
+    url = f"http://{host}:{port}"
     print(f"VideoFeed v{__version__} (released {__release_date__})")
-    print(f"Listening on http://{host}:{port}")
+    print(f"Listening on {url}")
+
+    if _should_open_browser():
+        threading.Thread(
+            target=_wait_then_open_browser,
+            args=(url,),
+            daemon=True,
+        ).start()
+
     # timeout_graceful_shutdown: cap how long uvicorn waits for in-flight Range
     # streams to finish on Ctrl+C. The browser keeps the raw-stream connection
     # open for the entire video file, so without a cap shutdown hangs until the
     # user closes the tab. 3s is enough for normal API requests to drain.
+    #
+    # Pass the app object directly (not "backend.main:app") so uvicorn's
+    # import-string machinery doesn't run inside the PyInstaller bundle —
+    # that codepath is fragile when the package was extracted from _MEIPASS.
+    from backend.main import app
     uvicorn.run(
-        "backend.main:app",
+        app,
         host=host,
         port=port,
         reload=False,

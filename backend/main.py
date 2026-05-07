@@ -1,16 +1,58 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import re
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
-# Windows/asyncio logs ConnectionResetError when the browser aborts a video
-# Range request (seek, navigate away) — harmless, just noisy.
-logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
+def _configure_logging() -> None:
+    """Configure logging with a console handler and (when frozen) a file sink.
+
+    A PyInstaller --noconsole bundle has no usable stdout/stderr — without a
+    file sink, every error vanishes and "the app just doesn't work" with no
+    way to diagnose. Write a rotating log to %LOCALAPPDATA%\\VideoFeed\\logs\\
+    so the user can inspect (or send) it.
+    """
+    fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # Replace any handlers Python set up by default so we control formatting.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    if getattr(sys, "frozen", False):
+        try:
+            from .config import get_settings
+            log_dir = get_settings().data_dir.parent / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_dir / "server.log",
+                maxBytes=2 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(fmt)
+            root.addHandler(file_handler)
+        except OSError:
+            # If the data dir isn't writable we already lose persistence anyway —
+            # don't crash startup over a logging-only problem.
+            pass
+
+    # Windows/asyncio logs ConnectionResetError when the browser aborts a video
+    # Range request (seek, navigate away) — harmless, just noisy.
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
+
+_configure_logging()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
