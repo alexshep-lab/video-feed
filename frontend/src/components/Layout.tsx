@@ -1,5 +1,6 @@
 import { PropsWithChildren, useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
+import { API_BASE } from "../api/client";
 
 type VersionInfo = { version: string; release_date: string; name: string };
 
@@ -10,7 +11,11 @@ export default function Layout({ children }: PropsWithChildren) {
   const [version, setVersion] = useState<VersionInfo | null>(null);
 
   useEffect(() => {
-    fetch("/api/version")
+    // Use API_BASE (not the absolute /api/version path) so this works in
+    // the dev server (port 3000 with no proxy) and in any future packaged
+    // form where the SPA may be served from a different origin than the
+    // FastAPI backend.
+    fetch(`${API_BASE}/version`)
       .then((r) => (r.ok ? r.json() : null))
       .then((v) => v && setVersion(v))
       .catch(() => {});
