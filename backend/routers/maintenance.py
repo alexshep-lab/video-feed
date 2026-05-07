@@ -1,7 +1,7 @@
 """Maintenance endpoints: duplicates, compression, contact sheets, etc."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
