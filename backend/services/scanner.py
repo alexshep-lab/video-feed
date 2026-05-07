@@ -207,8 +207,12 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
         if existing and not needs_metadata:
             lib_path = sanitize_text(str(lib_resolved))
             library_moved = existing.library_path != lib_path
-            if library_moved:
-                existing.library_path = lib_path
+            resurrected = existing.deleted_at is not None
+            if resurrected:
+                existing.deleted_at = None
+            if library_moved or resurrected:
+                if library_moved:
+                    existing.library_path = lib_path
                 updated += 1
                 batch_count += 1
             else:
@@ -286,6 +290,9 @@ def scan_library(session: Session, force_metadata: bool = False) -> dict:
             if file_needs_convert:
                 pending_conversion_ids.append(video.id)
         else:
+            # File is back on disk: clear any prior soft-delete marker.
+            existing.deleted_at = None
+
             # Source content changed (size/mtime differ) → cached conversion is stale.
             # Drop the old converted file and let the worker regenerate it if still needed.
             if needs_metadata and existing.converted_path:
