@@ -91,21 +91,34 @@ def _pipeline_stats(db: Session) -> dict:
 
 @router.get("")
 def get_stats(db: Session = Depends(get_db)) -> dict:
-    """Aggregated statistics for the stats page."""
+    """Aggregated statistics for the stats page.
+
+    Every query filters ``Video.deleted_at.is_(None)`` so the numbers match
+    what the library page actually shows. The pipeline section already does
+    this; "all historical rows" is not a useful interpretation here — a row
+    a user trashed shouldn't keep inflating their library size or favorites
+    count.
+    """
+    active = Video.deleted_at.is_(None)
+
     # Total videos and library size
-    total_videos = db.scalar(select(func.count(Video.id))) or 0
-    total_size = db.scalar(select(func.sum(Video.file_size))) or 0
-    total_duration = db.scalar(select(func.sum(Video.duration))) or 0
-    total_favorites = db.scalar(select(func.count(Video.id)).where(Video.favorite == True)) or 0  # noqa: E712
+    total_videos = db.scalar(select(func.count(Video.id)).where(active)) or 0
+    total_size = db.scalar(select(func.sum(Video.file_size)).where(active)) or 0
+    total_duration = db.scalar(select(func.sum(Video.duration)).where(active)) or 0
+    total_favorites = db.scalar(
+        select(func.count(Video.id)).where(active, Video.favorite == True)  # noqa: E712
+    ) or 0
 
     # Watch stats
-    total_views = db.scalar(select(func.sum(Video.view_count))) or 0
-    total_watch_time = db.scalar(select(func.sum(Video.total_watch_time))) or 0
+    total_views = db.scalar(select(func.sum(Video.view_count)).where(active)) or 0
+    total_watch_time = db.scalar(
+        select(func.sum(Video.total_watch_time)).where(active)
+    ) or 0
 
     # Most viewed videos (top 10)
     most_viewed = db.execute(
         select(Video.id, Video.title, Video.view_count, Video.total_watch_time, Video.duration)
-        .where(Video.view_count > 0)
+        .where(active, Video.view_count > 0)
         .order_by(desc(Video.view_count))
         .limit(10)
     ).all()
@@ -113,15 +126,16 @@ def get_stats(db: Session = Depends(get_db)) -> dict:
     # Most watched by time (top 10)
     most_watched_time = db.execute(
         select(Video.id, Video.title, Video.total_watch_time, Video.view_count, Video.duration)
-        .where(Video.total_watch_time > 0)
+        .where(active, Video.total_watch_time > 0)
         .order_by(desc(Video.total_watch_time))
         .limit(10)
     ).all()
 
-    # Recent watch history (last 30)
+    # Recent watch history (last 30) — only events on still-present videos.
     recent_events = db.execute(
         select(WatchEvent.video_id, WatchEvent.watched_at, WatchEvent.watch_duration, Video.title)
         .join(Video, Video.id == WatchEvent.video_id)
+        .where(active)
         .order_by(desc(WatchEvent.watched_at))
         .limit(30)
     ).all()
@@ -142,7 +156,7 @@ def get_stats(db: Session = Depends(get_db)) -> dict:
     # Favorites
     favorites = db.execute(
         select(Video.id, Video.title, Video.view_count, Video.total_watch_time, Video.duration)
-        .where(Video.favorite == True)  # noqa: E712
+        .where(active, Video.favorite == True)  # noqa: E712
         .order_by(desc(Video.view_count))
         .limit(20)
     ).all()
