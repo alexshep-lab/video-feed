@@ -43,40 +43,63 @@ settings = get_settings()
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _migrate_videos_table() -> None:
-    """Add columns introduced after the initial schema. SQLite-only, idempotent.
-
-    SQLAlchemy's ``create_all`` will not modify existing tables, so when we add
-    new columns we need to ALTER TABLE manually. We probe the existing schema
-    via ``PRAGMA table_info`` and only ADD what is missing.
-    """
-    expected = [
+_TABLE_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "videos": [
         ("convert_status", "VARCHAR(32) NOT NULL DEFAULT 'none'"),
         ("convert_progress", "FLOAT NOT NULL DEFAULT 0.0"),
         ("converted_path", "VARCHAR(2048)"),
         ("palette_error", "TEXT"),
         ("palette_failed_at", "DATETIME"),
-    ]
+    ],
+    "library_folders": [
+        ("is_incoming", "BOOLEAN NOT NULL DEFAULT 0"),
+    ],
+}
+
+
+def _migrate_tables() -> None:
+    """Add columns introduced after the initial schema. SQLite-only, idempotent.
+
+    SQLAlchemy's ``create_all`` will not modify existing tables, so when we add
+    new columns we need to ALTER TABLE manually. We probe the existing schema
+    via ``PRAGMA table_info`` and only ADD what is missing. Each table has its
+    own expected-column list in ``_TABLE_MIGRATIONS``.
+    """
+    log = logging.getLogger(__name__)
     with engine.begin() as connection:
-        existing_cols = {
-            row[1]
-            for row in connection.exec_driver_sql("PRAGMA table_info(videos)").fetchall()
-        }
-        for col_name, col_def in expected:
-            # Defensive: the pair comes from a hardcoded literal above, but if
-            # someone edits this list later a bad identifier shouldn't become
-            # an injection vector.
-            if not _IDENT_RE.match(col_name):
-                raise ValueError(f"Refusing to migrate with invalid identifier: {col_name!r}")
-            if col_name not in existing_cols:
-                logging.getLogger(__name__).info("Migrating videos table: adding column %s", col_name)
-                connection.exec_driver_sql(f"ALTER TABLE videos ADD COLUMN {col_name} {col_def}")
+        for table, expected in _TABLE_MIGRATIONS.items():
+            if not _IDENT_RE.match(table):
+                raise ValueError(f"Refusing to migrate with invalid table name: {table!r}")
+            existing_cols = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+            }
+            if not existing_cols:
+                # Table doesn't exist yet — Base.metadata.create_all should
+                # have run first in normal startup, but skip cleanly so the
+                # helper is safe to call against a partial DB (e.g. tests).
+                continue
+            for col_name, col_def in expected:
+                # Defensive: the pair comes from a hardcoded literal above, but
+                # if someone edits this list later a bad identifier shouldn't
+                # become an injection vector.
+                if not _IDENT_RE.match(col_name):
+                    raise ValueError(
+                        f"Refusing to migrate with invalid identifier: {col_name!r}"
+                    )
+                if col_name not in existing_cols:
+                    log.info("Migrating %s: adding column %s", table, col_name)
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
+                    )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
-    _migrate_videos_table()
+    _migrate_tables()
 
     with SessionLocal() as session:
         # Bootstrap: if no LibraryFolder rows exist, seed from config (.env / defaults)
