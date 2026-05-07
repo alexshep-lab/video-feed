@@ -130,17 +130,20 @@ export default function WatchPage() {
 
   // Track watch time and report every 10s
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const onTime = () => { watchTimeRef.current = video.currentTime; };
-    video.addEventListener("timeupdate", onTime);
+    const el = videoRef.current;
+    if (!el) return;
+    const onTime = () => { watchTimeRef.current = el.currentTime; };
+    el.addEventListener("timeupdate", onTime);
     const interval = setInterval(() => {
       if (videoId && watchTimeRef.current > 0) {
         updateWatchTime(videoId, watchTimeRef.current).catch(() => null);
       }
     }, 10000);
-    return () => { video.removeEventListener("timeupdate", onTime); clearInterval(interval); };
-  }, [video, videoId]);
+    return () => { el.removeEventListener("timeupdate", onTime); clearInterval(interval); };
+    // Use video?.id (stable string after load) instead of the whole video
+    // object so PATCH responses (toggleFavorite/saveTags/etc.) don't tear
+    // down and recreate the report interval on every state change.
+  }, [video?.id, videoId]);
 
   // Global keyboard controls — bypass the browser's default <video> handlers
   // (those only fire when the player itself has focus, which it loses as soon
@@ -298,7 +301,13 @@ export default function WatchPage() {
       hlsRef.current?.destroy();
       hlsRef.current = null;
     };
-  }, [playerMode, video]);
+    // Depend on the specific fields the effect actually reads — not the
+    // whole `video` object. updateVideo() returns a fresh VideoDetail
+    // reference on every PATCH (favorite toggle, tag save, etc.); if we
+    // depended on `video`, the player would tear down, reattach HLS, and
+    // jump back to t=0 every time the user clicked the heart or saved
+    // tags. The fields below are the only ones the effect reads.
+  }, [playerMode, video?.hls_stream_url, video?.raw_stream_url, reviewMode]);
 
   if (error) return <p className="text-red-300">{error}</p>;
   if (!video) return <p className="text-white/60">Loading player...</p>;
