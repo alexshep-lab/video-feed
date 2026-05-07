@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+import logging
 import sqlite3
 
 from sqlalchemy import create_engine
@@ -10,11 +11,20 @@ from sqlalchemy.pool import StaticPool
 from .config import get_settings
 
 
+logger = logging.getLogger("videofeed.database")
+
 settings = get_settings()
 active_database_url = settings.database_url
 
 
-def _can_use_filesystem_sqlite() -> bool:
+def _can_use_filesystem_sqlite() -> tuple[bool, str | None]:
+    """Probe whether settings.database_path is usable as a SQLite file.
+
+    Returns (ok, error_message). On success, error_message is None;
+    on failure, it carries the underlying OSError text so callers can
+    surface it instead of silently falling back to an in-memory DB
+    (which loses every byte of state on restart).
+    """
     try:
         database_path = settings.database_path
         database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -22,9 +32,9 @@ def _can_use_filesystem_sqlite() -> bool:
         connection.execute("create table if not exists __healthcheck (id integer primary key)")
         connection.commit()
         connection.close()
-        return True
-    except Exception:
-        return False
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
 
 
 class Base(DeclarativeBase):
@@ -39,7 +49,8 @@ def _enable_wal(dbapi_conn, connection_record):
     cursor.close()
 
 
-if _can_use_filesystem_sqlite():
+_db_ok, _db_error = _can_use_filesystem_sqlite()
+if _db_ok:
     engine = create_engine(
         settings.database_url,
         connect_args={"check_same_thread": False},
@@ -49,6 +60,16 @@ if _can_use_filesystem_sqlite():
     event.listen(engine, "connect", _enable_wal)
 else:
     active_database_url = "sqlite+pysqlite:///:memory:"
+    # Loud warning: an in-memory DB means every scan, every favorite, every
+    # watched-progress entry vanishes on restart. The user almost certainly
+    # didn't want that — surface the actual filesystem error so they can fix
+    # permissions or pick a writable VIDEOFEED_DATABASE_PATH.
+    logger.error(
+        "!! Cannot open %s for SQLite: %s. Falling back to IN-MEMORY DB — "
+        "all data will be lost on restart. Fix this before relying on the server.",
+        settings.database_path,
+        _db_error,
+    )
     engine = create_engine(
         active_database_url,
         connect_args={"check_same_thread": False},
