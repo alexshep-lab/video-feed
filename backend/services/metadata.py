@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 from ..config import get_settings
@@ -112,14 +114,24 @@ def extract_video_metadata(path: Path) -> dict:
     }
 
 
+@lru_cache(maxsize=2)
+def _binary_on_path(name_or_path: str) -> bool:
+    """Cheap availability probe: shutil.which without spawning the process.
+
+    Honors absolute paths in settings (returns True iff the file exists
+    and is executable) as well as PATH-resolved names. lru_cache keeps
+    the result for the process lifetime — restart after installing
+    FFmpeg so the cache picks it up.
+    """
+    return shutil.which(name_or_path) is not None
+
+
 def ffprobe_available() -> bool:
-    try:
-        probe_video(Path(__file__))
-    except FileNotFoundError:
-        return False
-    except RuntimeError:
-        return True
-    return True
+    return _binary_on_path(get_settings().ffprobe_binary)
+
+
+def ffmpeg_available() -> bool:
+    return _binary_on_path(get_settings().ffmpeg_binary)
 
 
 def _safe_int(value: object) -> int | None:

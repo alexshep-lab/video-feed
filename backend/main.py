@@ -168,13 +168,17 @@ if _assets_dir.exists():
 
 
 @app.get("/health")
-def healthcheck() -> dict[str, str]:
+def healthcheck() -> dict[str, object]:
+    from .services.metadata import ffmpeg_available, ffprobe_available
+
     database_mode = "memory" if ":memory:" in active_database_url else "file"
     return {
         "status": "ok",
         "database": database_mode,
         "version": __version__,
         "release_date": __release_date__,
+        "ffmpeg": ffmpeg_available(),
+        "ffprobe": ffprobe_available(),
     }
 
 
