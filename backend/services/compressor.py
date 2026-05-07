@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
+from ._queue_tracking import QueuedIds
 from .encoder import build_quality_video_args, get_effective_encoder
 from .metadata import extract_video_metadata
 from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
@@ -27,6 +28,7 @@ from .thumbnail import generate_contact_sheet, generate_thumbnail, invalidate_vi
 logger = logging.getLogger("videofeed.compressor")
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
+_queued_ids = QueuedIds()
 _worker_task: asyncio.Task | None = None
 _current_video_id: str | None = None
 _current_proc: asyncio.subprocess.Process | None = None
@@ -79,6 +81,7 @@ def get_compress_status() -> dict:
 
 def enqueue_compress(video_id: str) -> None:
     _begin_tracking(1)
+    _queued_ids.add(video_id)
     _queue.put_nowait(video_id)
 
 
@@ -116,7 +119,7 @@ def count_oversized_candidates(session: Session, min_height: int = 1440, force: 
 def enqueue_oversized(session: Session, min_height: int = 1440, force: bool = False) -> int:
     """Queue all oversized videos that are eligible for compression."""
     videos = get_oversized_candidates(session, min_height=min_height, force=force)
-    queued_ids = {item for item in list(_queue._queue) if item != "__STOP__"}  # type: ignore[attr-defined]
+    queued_ids = _queued_ids.snapshot()
     if _current_video_id:
         queued_ids.add(_current_video_id)
 
@@ -124,6 +127,7 @@ def enqueue_oversized(session: Session, min_height: int = 1440, force: bool = Fa
     for v in videos:
         if v.id in queued_ids:
             continue
+        _queued_ids.add(v.id)
         _queue.put_nowait(v.id)
         v.compress_status = "pending"
         v.compress_progress = 0.0
@@ -181,6 +185,7 @@ def stop_compress_all() -> dict:
             dropped += 1
         except asyncio.QueueEmpty:
             break
+    _queued_ids.clear()
 
     killed = False
     if _current_proc is not None and _current_proc.returncode is None:
@@ -226,6 +231,7 @@ async def _worker_loop() -> None:
         video_id = await _queue.get()
         if video_id == "__STOP__":
             break
+        _queued_ids.discard(video_id)
         _current_video_id = video_id
         try:
             await _compress_video(video_id)

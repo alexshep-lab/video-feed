@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
+from ._queue_tracking import QueuedIds
 from .encoder import build_hw_decode_args, build_quality_video_args, get_effective_encoder
 from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 from .thumbnail import generate_contact_sheet, generate_thumbnail, invalidate_video_cache
@@ -98,6 +99,7 @@ AUDIO_BITRATE = "160k"
 CONCURRENCY = 2
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
+_queued_ids = QueuedIds()
 _worker_tasks: list[asyncio.Task] = []
 # Per-worker active job state. Keyed by worker index; value is
 # {"video_id": str, "proc": Process | None}. Only workers that currently hold
@@ -174,6 +176,7 @@ def get_convert_status() -> dict:
 
 def enqueue_convert(video_id: str) -> None:
     _begin_tracking(1)
+    _queued_ids.add(video_id)
     _queue.put_nowait(video_id)
 
 
@@ -260,7 +263,7 @@ def enqueue_all_pending_conversions(session: Session) -> int:
     # sees most of their library become playable quickly, instead of waiting out
     # a long queue of heavy WMV transcodes before the fast ones get a turn.
     videos = list(session.scalars(_apply_sort(_base_pending_conversion_query(), "h264_first")).all())
-    queued_ids = {item for item in list(_queue._queue) if item != "__STOP__"}  # type: ignore[attr-defined]
+    queued_ids = _queued_ids.snapshot()
     for slot in _active.values():
         queued_ids.add(slot["video_id"])
 
@@ -268,6 +271,7 @@ def enqueue_all_pending_conversions(session: Session) -> int:
     for v in videos:
         if v.id in queued_ids:
             continue
+        _queued_ids.add(v.id)
         _queue.put_nowait(v.id)
         v.convert_status = "pending"
         v.convert_progress = 0.0
@@ -303,6 +307,7 @@ def stop_convert_all() -> dict:
             dropped += 1
         except asyncio.QueueEmpty:
             break
+    _queued_ids.clear()
 
     killed = 0
     interrupted_ids: list[str] = []
@@ -354,6 +359,7 @@ async def _worker_loop(worker_id: int) -> None:
         if video_id == "__STOP__":
             _queue.task_done()
             break
+        _queued_ids.discard(video_id)
         _active[worker_id] = {"video_id": video_id, "proc": None}
         try:
             await _convert_video(worker_id, video_id)

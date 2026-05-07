@@ -31,11 +31,13 @@ SORT_OPTIONS = {
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
+from ._queue_tracking import QueuedIds
 from .thumbnail import generate_contact_sheet, kill_running_ffmpeg_procs
 
 logger = logging.getLogger("videofeed.palette")
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
+_queued_ids = QueuedIds()
 _worker_task: asyncio.Task | None = None
 _current_video_id: str | None = None
 _batch_total_jobs = 0
@@ -171,17 +173,14 @@ def enqueue_batch(video_ids: list[str]) -> int:
     """Enqueue an explicit list of video IDs — used for ‘process selected first’."""
     global _stop_requested
     _stop_requested = False
-    queued_ids: set[str] = set()
-    try:
-        queued_ids = {item for item in list(_queue._queue) if item != "__STOP__"}  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    queued_ids = _queued_ids.snapshot()
     if _current_video_id:
         queued_ids.add(_current_video_id)
     count = 0
     for vid in video_ids:
         if vid in queued_ids:
             continue
+        _queued_ids.add(vid)
         _queue.put_nowait(vid)
         count += 1
     _begin_tracking(count)
@@ -196,12 +195,7 @@ def enqueue_missing_palettes(session: Session) -> int:
     rows = session.execute(
         select(Video.id).where(Video.deleted_at.is_(None))
     ).all()
-    # Avoid re-queuing IDs already in the queue
-    queued_ids: set[str] = set()
-    try:
-        queued_ids = {item for item in list(_queue._queue) if item != "__STOP__"}  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    queued_ids = _queued_ids.snapshot()
     if _current_video_id:
         queued_ids.add(_current_video_id)
 
@@ -211,6 +205,7 @@ def enqueue_missing_palettes(session: Session) -> int:
             continue
         if palette_exists(video_id):
             continue
+        _queued_ids.add(video_id)
         _queue.put_nowait(video_id)
         count += 1
 
@@ -220,6 +215,7 @@ def enqueue_missing_palettes(session: Session) -> int:
 
 def enqueue_one(video_id: str) -> None:
     _begin_tracking(1)
+    _queued_ids.add(video_id)
     _queue.put_nowait(video_id)
 
 
@@ -241,6 +237,7 @@ async def stop_palette_worker() -> None:
             _queue.task_done()
         except asyncio.QueueEmpty:
             break
+    _queued_ids.clear()
     # Kill any ffmpeg running in a worker thread — otherwise the thread stays
     # alive, Python won't exit, and the server hangs on shutdown.
     kill_running_ffmpeg_procs()
@@ -270,6 +267,7 @@ def stop_palette_all() -> dict:
             dropped += 1
         except asyncio.QueueEmpty:
             break
+    _queued_ids.clear()
     _batch_total_jobs = _batch_completed_jobs + _batch_failed_jobs + (1 if _current_video_id else 0)
     killed = kill_running_ffmpeg_procs()
     logger.warning("Palette STOP: dropped=%d interrupted=%s killed_procs=%d", dropped, _current_video_id, killed)
@@ -309,6 +307,7 @@ async def _worker_loop() -> None:
         video_id = await _queue.get()
         if video_id == "__STOP__":
             break
+        _queued_ids.discard(video_id)
         if _stop_requested:
             # Additional guard — drop items pushed just before stop was pressed
             _queue.task_done()
