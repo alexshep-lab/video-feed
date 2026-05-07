@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchVideos, fetchFilters, fetchLibraries, addLibrary, scanLibrary, fetchScanProgress,
   updateVideo,
@@ -219,7 +219,19 @@ export default function HomePage() {
     setSelectedTags((prev) => (prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]));
   }
 
-  const activeTagSet = new Set(selectedTags);
+  // Memoize so VideoCard children don't see a fresh Set on every keystroke
+  // in the search box / sidebar; equality is by ref, fresh Set = full rerender.
+  const activeTagSet = useMemo(() => new Set(selectedTags), [selectedTags]);
+
+  // Sidebar tag list filtered by the tag-search input. Recomputing this on
+  // every render is fine for tens of tags but visibly laggy with hundreds —
+  // keep it pinned to its real inputs.
+  const visibleTags = useMemo(() => {
+    const all = filters?.tags ?? [];
+    if (!tagSearch) return all;
+    const needle = tagSearch.toLowerCase();
+    return all.filter((t) => t.name.toLowerCase().includes(needle));
+  }, [filters?.tags, tagSearch]);
 
   async function confirmVideo(videoId: string) {
     const current = videos.find((v) => v.id === videoId);
@@ -356,22 +368,20 @@ export default function HomePage() {
               </div>
             )}
             <div className="max-h-48 overflow-y-auto space-y-0.5 mt-1">
-              {filters.tags
-                .filter((t) => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase()))
-                .map((t) => {
-                  const active = selectedTags.includes(t.name);
-                  return (
-                    <button
-                      key={t.id}
-                      onClick={() =>
-                        setSelectedTags(active ? selectedTags.filter((x) => x !== t.name) : [...selectedTags, t.name])
-                      }
-                      className={`w-full text-left px-2 py-0.5 rounded text-xs transition ${active ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white hover:bg-white/5"}`}
-                    >
-                      {t.name} <span className="text-white/30">({t.video_count})</span>
-                    </button>
-                  );
-                })}
+              {visibleTags.map((t) => {
+                const active = selectedTags.includes(t.name);
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() =>
+                      setSelectedTags(active ? selectedTags.filter((x) => x !== t.name) : [...selectedTags, t.name])
+                    }
+                    className={`w-full text-left px-2 py-0.5 rounded text-xs transition ${active ? "bg-accent/20 text-accent" : "text-white/50 hover:text-white hover:bg-white/5"}`}
+                  >
+                    {t.name} <span className="text-white/30">({t.video_count})</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
