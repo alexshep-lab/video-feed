@@ -34,6 +34,11 @@ class VideoBase(BaseModel):
     convert_progress: float = 0.0
     added_at: datetime
     tag_list: list[str] = Field(default_factory=list)
+    # True when the source isn't browser-playable and would need HLS
+    # transcoding before <video> can render it. Computed server-side from
+    # the same extension+codec rules the converter uses, so the player UI
+    # never has to mirror that list (it would silently drift).
+    needs_transcode: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

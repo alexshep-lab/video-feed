@@ -15,7 +15,7 @@ from ..schemas import (
     VideoListItem,
     VideoUpdate,
 )
-from ..services.converter import NEEDS_CONVERSION_EXTENSIONS
+from ..services.converter import NEEDS_CONVERSION_EXTENSIONS, needs_conversion
 from ..services.palette import list_existing_palette_ids, palette_exists
 
 
@@ -787,6 +787,13 @@ def to_detail_item(request: Request, video: Video) -> VideoDetail:
     if video.transcode_status == "completed" and video.hls_path:
         hls_url = str(request.url_for("stream_hls", video_id=video.id, path="master.m3u8"))
 
+    # If a successful conversion exists, the raw endpoint streams the converted
+    # MP4 — no further transcode needed regardless of the original extension.
+    if (video.convert_status or "none") == "completed":
+        needs_xcode = False
+    else:
+        needs_xcode = needs_conversion(video.original_path or "", video.codec)
+
     return VideoDetail(
         id=video.id,
         title=video.title,
@@ -815,6 +822,7 @@ def to_detail_item(request: Request, video: Video) -> VideoDetail:
         convert_status=video.convert_status or "none",
         convert_progress=video.convert_progress or 0.0,
         added_at=video.added_at,
+        needs_transcode=needs_xcode,
         original_path=video.original_path,
         raw_stream_url=str(request.url_for("stream_raw_video", video_id=video.id)),
         hls_path=video.hls_path,

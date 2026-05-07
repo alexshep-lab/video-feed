@@ -42,6 +42,7 @@ export type VideoItem = {
   convert_progress: number;
   added_at: string;
   tag_list: string[];
+  needs_transcode: boolean;
   raw_stream_url: string;
   hls_stream_url: string | null;
   thumbnail_url: string;

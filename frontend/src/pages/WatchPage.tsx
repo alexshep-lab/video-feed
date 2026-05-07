@@ -18,16 +18,12 @@ import {
 } from "../api/client";
 import { formatDuration, formatFileSize } from "../utils/format";
 
-const NON_NATIVE_EXTENSIONS = [".wmv", ".avi"];
-
 function needsTranscode(video: VideoDetail | VideoItem): boolean {
-  // If browser-friendly conversion is done, the raw stream endpoint serves
-  // the converted MP4 — no HLS transcoding needed, no matter what the
-  // original extension is.
-  if (video.convert_status === "completed") return false;
-  const filename = video.original_filename;
-  const ext = filename.toLowerCase().slice(filename.lastIndexOf("."));
-  return NON_NATIVE_EXTENSIONS.includes(ext);
+  // Server-side flag computed by services.converter.needs_conversion (extension
+  // + codec checks, with convert_status="completed" short-circuit). Defining
+  // this list on the client risks drifting from the backend whenever a new
+  // container is added — let the backend be the single source of truth.
+  return video.needs_transcode;
 }
 
 function formatWatchTime(seconds: number): string {
