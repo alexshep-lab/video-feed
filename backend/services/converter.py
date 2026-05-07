@@ -25,6 +25,7 @@ from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
 from .encoder import build_hw_decode_args, build_quality_video_args, get_effective_encoder
+from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 from .thumbnail import generate_contact_sheet, generate_thumbnail, invalidate_video_cache
 
 logger = logging.getLogger("videofeed.converter")
@@ -508,6 +509,7 @@ async def _run_ffmpeg_with_progress(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **HIDDEN_SUBPROCESS_KWARGS,
     )
     slot = _active.get(worker_id)
     if slot is not None:

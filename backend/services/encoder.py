@@ -16,6 +16,7 @@ import subprocess
 from functools import lru_cache
 
 from ..config import get_settings
+from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 
 logger = logging.getLogger("videofeed.encoder")
 
@@ -37,6 +38,7 @@ def detect_cuda_decode_available() -> bool:
             errors="replace",
             check=False,
             timeout=10,
+            **HIDDEN_SUBPROCESS_KWARGS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         logger.warning("CUDA decode detection failed: %s", exc)
@@ -83,6 +85,7 @@ def detect_nvenc_available() -> bool:
             errors="replace",
             check=False,
             timeout=10,
+            **HIDDEN_SUBPROCESS_KWARGS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         logger.warning("NVENC detection failed: %s", exc)

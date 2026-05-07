@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..config import get_settings
 from .encoder import build_hw_decode_args
+from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 
 
 def _ffmpeg_input_path(path: Path) -> str:
@@ -60,6 +61,7 @@ def _run_one(cmd: list[str]) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace",
+        **HIDDEN_SUBPROCESS_KWARGS,
     )
     _running_procs.add(proc)
     try:

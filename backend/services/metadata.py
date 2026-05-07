@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from ..config import get_settings
+from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 
 
 SUPPORTED_EXTENSIONS = {
@@ -39,6 +40,7 @@ def probe_video(path: Path) -> dict:
         encoding="utf-8",
         errors="replace",
         check=False,
+        **HIDDEN_SUBPROCESS_KWARGS,
     )
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or "ffprobe failed")

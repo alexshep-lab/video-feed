@@ -21,6 +21,7 @@ from ..database import SessionLocal
 from ..models import Video
 from .encoder import build_quality_video_args, get_effective_encoder
 from .metadata import extract_video_metadata
+from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 from .thumbnail import generate_contact_sheet, generate_thumbnail, invalidate_video_cache
 
 logger = logging.getLogger("videofeed.compressor")
@@ -302,6 +303,7 @@ async def _compress_video(video_id: str) -> None:
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **HIDDEN_SUBPROCESS_KWARGS,
     )
     _current_proc = proc
 

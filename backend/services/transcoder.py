@@ -18,6 +18,7 @@ from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
 from .encoder import build_bitrate_video_args, get_effective_encoder
+from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 
 logger = logging.getLogger("videofeed.transcoder")
 
@@ -158,6 +159,7 @@ async def _transcode_video(video_id: str) -> None:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **HIDDEN_SUBPROCESS_KWARGS,
         )
 
         # Parse progress from stderr
