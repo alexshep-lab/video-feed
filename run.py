@@ -145,15 +145,49 @@ def main() -> None:
     # server.log), so access logs and startup info still land in the file.
     # Source mode keeps uvicorn's default colored output.
     from backend.main import app
-    uvicorn_kwargs: dict = {
+    config_kwargs: dict = {
         "host": host,
         "port": port,
         "reload": False,
         "timeout_graceful_shutdown": 3,
     }
     if getattr(sys, "frozen", False):
-        uvicorn_kwargs["log_config"] = None
-    uvicorn.run(app, **uvicorn_kwargs)
+        config_kwargs["log_config"] = None
+        _run_with_tray(app, url, config_kwargs)
+    else:
+        uvicorn.run(app, **config_kwargs)
+
+
+def _run_with_tray(app, url: str, config_kwargs: dict) -> None:
+    """Frozen-mode entry: uvicorn on a worker thread, tray icon on main.
+
+    Without this, a --noconsole bundle has no UI affordance to stop the
+    server: the user closes the browser tab, the process keeps running,
+    Task Manager is the only way out. The tray icon gives Open / Quit
+    menu items the way every Windows desktop tool is expected to.
+    """
+    config = uvicorn.Config(app, **config_kwargs)
+    server = uvicorn.Server(config)
+
+    server_thread = threading.Thread(target=server.run, name="uvicorn", daemon=False)
+    server_thread.start()
+
+    icon_path = get_settings().static_dir / "assets" / "logo" / "favicon.ico"
+
+    def _on_quit() -> None:
+        # uvicorn watches this flag inside its main loop and triggers a
+        # graceful shutdown when it flips. Setting it from the click handler
+        # is fine — attribute assignment is GIL-atomic.
+        server.should_exit = True
+
+    # Imported lazily because pystray is a frozen-mode-only dep; source-mode
+    # runs never reach this branch and don't need to import it.
+    from backend.tray import run_tray
+    run_tray(url=url, icon_path=icon_path, on_quit=_on_quit)
+
+    # Tray loop returned (Quit clicked or icon was killed externally) — wait
+    # for uvicorn to drain. timeout_graceful_shutdown caps the inner await.
+    server_thread.join(timeout=10)
 
 
 if __name__ == "__main__":

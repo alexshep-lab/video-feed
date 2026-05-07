@@ -2,3 +2,8 @@
 pytest==9.0.3
 httpx==0.28.1
 pyinstaller==6.16.0
+# Tray icon for the frozen Windows desktop bundle. Imported only via
+# backend/tray.py, which run.py loads lazily inside the frozen branch — so
+# source-mode users don't strictly need these, but the bundle build does.
+pystray==0.19.5
+Pillow>=11.0.0

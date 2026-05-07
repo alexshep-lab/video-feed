@@ -49,6 +49,14 @@ a = Analysis(
         "uvicorn.protocols.websockets.auto",
         "uvicorn.lifespan",
         "uvicorn.lifespan.on",
+        # pystray picks its backend at runtime via __import__("pystray._" + os);
+        # PyInstaller can't see that. Force the Win32 backend explicitly.
+        "pystray._win32",
+        # Pillow plugins for the formats our tray icon might come in as
+        # (favicon.ico is the default; PNG fallback exists). Without these
+        # hints, Image.open works but plugin auto-discovery silently no-ops.
+        "PIL.IcoImagePlugin",
+        "PIL.PngImagePlugin",
     ],
     hookspath=[],
     hooksconfig={},
