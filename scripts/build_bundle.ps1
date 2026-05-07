@@ -74,10 +74,21 @@ foreach ($dir in @("build", "dist\VideoFeed")) {
 
 # 3. Run PyInstaller --------------------------------------------------------
 Write-Host ">> Running PyInstaller..." -ForegroundColor Cyan
-# Merge stderr into stdout (2>&1) so PowerShell does not treat PyInstaller's
-# normal INFO log lines (which it writes to stderr) as native-command errors
-# under $ErrorActionPreference="Stop". Exit code stays authoritative.
-& $VenvPython -m PyInstaller --noconfirm videofeed.spec 2>&1 | ForEach-Object { Write-Host $_ }
+# PyInstaller writes its normal INFO progress to stderr. Under PowerShell
+# 5.1 + $ErrorActionPreference="Stop", that promotes the very first stderr
+# line to a NativeCommandError and aborts the script before $LASTEXITCODE
+# can ever be inspected - even with 2>&1 redirection.
+#
+# Localize ErrorActionPreference to Continue for the duration of the call
+# (so terminating-error promotion is suppressed) and rely on the explicit
+# $LASTEXITCODE check afterwards for actual success/failure.
+$prevErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & $VenvPython -m PyInstaller --noconfirm videofeed.spec 2>&1 | ForEach-Object { Write-Host $_ }
+} finally {
+    $ErrorActionPreference = $prevErrorActionPreference
+}
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed (exit $LASTEXITCODE)" }
 
 $exePath = Join-Path $repoRoot "dist\VideoFeed\VideoFeed.exe"

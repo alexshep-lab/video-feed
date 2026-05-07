@@ -3,7 +3,11 @@ export function resolveApiBase(): string {
   if (configured) return configured.replace(/\/+$/, "");
 
   const { protocol, hostname, origin, port } = window.location;
-  if (port === "5173") {
+  // Vite dev server is configured for port 3000 in vite.config.ts. The old
+  // value here was 5173 (Vite's out-of-box default), which never matched
+  // the running dev server, so the dev fallback silently used `${origin}/api`
+  // instead and 404'd against the dev server itself.
+  if (port === "3000") {
     return `${protocol}//${hostname}:47999/api`;
   }
 

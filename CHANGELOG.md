@@ -5,6 +5,59 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning is [SemVer](https://semver.org/) with a pre-1.0 suffix while the
 surface is still moving.
 
+## [0.4.0] — 2026-05-07
+
+### Added
+- **Windows desktop bundle**. PyInstaller `--onedir` spec
+  (`videofeed.spec`), build script (`scripts/build_bundle.ps1`), and a
+  desktop-shortcut installer (`scripts/install_shortcut.ps1`). Output:
+  `dist\VideoFeed\VideoFeed.exe` (~50 MB total bundle), launched via a
+  `.lnk` on the Desktop with the project favicon.
+- **System tray icon** (pystray) with `Open VideoFeed` and `Quit` menu
+  items — primary affordance for stopping the server when running
+  windowed (no console). Quit triggers a graceful uvicorn shutdown.
+- **Frozen-mode browser auto-open** — `run.py` polls `/health` after
+  uvicorn starts and pops the default browser at the bound URL.
+- **File logging** when frozen — rotating
+  `%LOCALAPPDATA%\VideoFeed\logs\server.log` (2 MB × 3) captures both
+  application logs and uvicorn's own access / startup output, since
+  `--noconsole` bundles have no usable stdout.
+
+### Changed
+- **Default port: 7999 → 47999** (retry walks 47999..48008). The old
+  range overlapped with the typical local dev band (3000/5173/8000/8080)
+  and collided with whatever else the user was running. The new default
+  sits well above that band.
+- `run.py` instantiates `uvicorn.Server` explicitly when frozen so the
+  tray's Quit handler can flip `should_exit = True`. Source-mode runs
+  still call `uvicorn.run()` blocking on the main thread.
+- `_resource_root()` and `_install_root()` helpers in `backend/config.py`
+  resolve read-only resources via `sys._MEIPASS` (frozen) and the .exe
+  parent for an optional user-editable `.env`.
+
+### Fixed
+- **Bundle startup crash** — PyInstaller `--noconsole` sets
+  `sys.stdout = sys.stderr = None`, so uvicorn's `DefaultFormatter`
+  crashed in `__init__` calling `sys.stdout.isatty()`. `run.py` now
+  redirects both streams to devnull at the very top of the file when
+  frozen, and passes `log_config=None` to `uvicorn.run()` so uvicorn's
+  loggers fall through to the root logger (which has the rotating
+  file handler).
+- `frontend/src/api/client.ts` dev-fallback was checking port 5173 but
+  Vite is configured for 3000; `${origin}/api` was returning the wrong
+  base in dev runs without `VITE_API_BASE` set.
+- `scripts/build_bundle.ps1` no longer trips on PyInstaller's stderr
+  INFO output. PyInstaller writes its normal progress lines to stderr,
+  and PowerShell 5.1 with `$ErrorActionPreference = "Stop"` was
+  promoting those to terminating native-command errors before
+  `$LASTEXITCODE` could be checked.
+
+### Packaging notes
+- FFmpeg / ffprobe are still **not bundled** — required in PATH;
+  `/health` reports their availability so the SPA can show a banner.
+- Bundle deps: `pystray==0.19.5` + `Pillow>=11.0.0` (in
+  `requirements-dev.txt` since source-mode never imports `backend.tray`).
+
 ## [0.3.0] — 2026-05-07
 
 ### Added

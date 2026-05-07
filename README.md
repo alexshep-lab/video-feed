@@ -9,9 +9,9 @@
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
-![Version](https://img.shields.io/badge/version-0.3.0-purple)
+![Version](https://img.shields.io/badge/version-0.4.0-purple)
 
-Latest release: **v0.3.0** — *2026-05-07* · see [CHANGELOG.md](CHANGELOG.md).
+Latest release: **v0.4.0** — *2026-05-07* · see [CHANGELOG.md](CHANGELOG.md).
 
 > ⚠️ **No auth, trusted-network only.** Read [SECURITY.md](SECURITY.md)
 > before exposing the port anywhere.
