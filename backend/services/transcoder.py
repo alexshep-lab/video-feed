@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Video
+from ._queue_tracking import QueuedIds
 from .encoder import build_bitrate_video_args, get_effective_encoder
 from .proc_utils import HIDDEN_SUBPROCESS_KWARGS
 
@@ -31,6 +32,7 @@ QUALITY_PRESETS = [
 
 # Global queue and state
 _queue: asyncio.Queue[str] = asyncio.Queue()
+_queued_ids = QueuedIds()
 _worker_task: asyncio.Task | None = None
 _current_video_id: str | None = None
 
@@ -44,16 +46,29 @@ def get_queue_status() -> dict:
 
 
 def enqueue_video(video_id: str) -> None:
+    if video_id == _current_video_id or video_id in _queued_ids.snapshot():
+        return
+    _queued_ids.add(video_id)
     _queue.put_nowait(video_id)
 
 
 def enqueue_all_pending(session: Session) -> int:
-    """Enqueue all videos with transcode_status='pending'."""
+    """Enqueue all videos with transcode_status='pending'.
+
+    Skips IDs already queued or currently transcoding so back-to-back
+    "transcode all" clicks don't create N copies of the same job.
+    """
     videos = session.scalars(
         select(Video).where(Video.transcode_status == "pending")
     ).all()
+    queued_ids = _queued_ids.snapshot()
+    if _current_video_id:
+        queued_ids.add(_current_video_id)
     count = 0
     for video in videos:
+        if video.id in queued_ids:
+            continue
+        _queued_ids.add(video.id)
         _queue.put_nowait(video.id)
         count += 1
     return count
@@ -86,6 +101,7 @@ async def _worker_loop() -> None:
         video_id = await _queue.get()
         if video_id == "__STOP__":
             break
+        _queued_ids.discard(video_id)
         _current_video_id = video_id
         try:
             await _transcode_video(video_id)
