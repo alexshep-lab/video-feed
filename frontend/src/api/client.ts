@@ -4,7 +4,7 @@ export function resolveApiBase(): string {
 
   const { protocol, hostname, origin, port } = window.location;
   if (port === "5173") {
-    return `${protocol}//${hostname}:7999/api`;
+    return `${protocol}//${hostname}:47999/api`;
   }
 
   return `${origin}/api`;

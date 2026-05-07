@@ -84,8 +84,8 @@ class Settings(BaseSettings):
     def cors_origins(self) -> list[str]:
         if not self.cors_origins_raw:
             return [
-                "http://localhost:7999",
-                "http://127.0.0.1:7999",
+                "http://localhost:47999",
+                "http://127.0.0.1:47999",
                 "http://localhost:5173",
                 "http://127.0.0.1:5173",
             ]

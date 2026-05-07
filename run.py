@@ -8,8 +8,8 @@ import uvicorn
 from backend import __release_date__, __version__
 from backend.config import get_settings
 
-DEFAULT_PORT = 7999
-PORT_RETRY_RANGE = 10  # try 7999..8008 inclusive
+DEFAULT_PORT = 47999
+PORT_RETRY_RANGE = 10  # try 47999..48008 inclusive
 
 
 def _find_open_port(host: str, start: int, attempts: int) -> int | None:

@@ -114,7 +114,7 @@ cd ..
 python run.py
 ```
 
-Open <http://127.0.0.1:7999>.
+Open <http://127.0.0.1:47999>.
 
 ### Prerequisites
 
@@ -223,9 +223,10 @@ Prefix `/api`. See `backend/routers/` for exhaustive parameters.
   the backend falls back to an in-memory DB so the app still starts.
   Library state is lost on restart in that mode — the underlying error
   is logged at `ERROR` level so you can see what went wrong in stderr.
-- Default port is **7999**. If it's busy (second instance, IDE proxy)
-  the launcher walks 8000…8008 looking for the first free port and
-  writes the chosen one to `%LOCALAPPDATA%\VideoFeed\data\port.txt`.
+- Default port is **47999** — picked far above the typical dev range
+  (3000/5173/8000/8080) so it doesn't fight with anything you're
+  running locally. If it's busy the launcher walks 48000…48008 and
+  writes the chosen port to `%LOCALAPPDATA%\VideoFeed\data\port.txt`.
 
 ## Roadmap
 

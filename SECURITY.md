@@ -16,7 +16,7 @@ port.
 
 ## Don't
 
-- **Do not expose the default HTTP port (7999) directly to the
+- **Do not expose the default HTTP port (47999) directly to the
   public internet.** Any HTTP client on the planet can then delete
   rows, recycle files, enqueue unbounded transcoding jobs, or list
   your filesystem via debug endpoints.
