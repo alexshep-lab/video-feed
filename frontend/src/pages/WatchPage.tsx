@@ -96,6 +96,7 @@ export default function WatchPage() {
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [tagsInput, setTagsInput] = useState("");
   const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const watchTimeRef = useRef(0);
@@ -317,29 +318,45 @@ export default function WatchPage() {
 
   async function toggleFavorite() {
     if (!video || !videoId) return;
-    const updated = await updateVideo(videoId, { favorite: !video.favorite });
-    setVideo(updated);
+    setActionError(null);
+    try {
+      const updated = await updateVideo(videoId, { favorite: !video.favorite });
+      setVideo(updated);
+    } catch (e) {
+      setActionError(`Не удалось сохранить избранное: ${(e as Error).message}`);
+    }
   }
 
   async function toggleConfirm() {
     if (!video || !videoId) return;
-    const updated = await updateVideo(videoId, { confirmed: !video.confirmed });
-    setVideo(updated);
-    // In review mode, a confirm is the "done with this one" gesture — jump
-    // straight to the next video matching the same filter so the user doesn't
-    // have to navigate back to the library each time.
-    if (reviewMode && !video.confirmed && updated.confirmed) {
-      await advanceToNext();
+    setActionError(null);
+    try {
+      const updated = await updateVideo(videoId, { confirmed: !video.confirmed });
+      setVideo(updated);
+      // In review mode, a confirm is the "done with this one" gesture — jump
+      // straight to the next video matching the same filter so the user doesn't
+      // have to navigate back to the library each time.
+      if (reviewMode && !video.confirmed && updated.confirmed) {
+        await advanceToNext();
+      }
+    } catch (e) {
+      setActionError(`Не удалось подтвердить: ${(e as Error).message}`);
     }
   }
 
   async function saveTags() {
     if (!videoId) return;
     setSaving(true);
+    setActionError(null);
     const tags = tagsInput.split(",").map((t) => t.trim()).filter(Boolean);
-    const updated = await updateVideo(videoId, { tag_list: tags });
-    setVideo(updated);
-    setSaving(false);
+    try {
+      const updated = await updateVideo(videoId, { tag_list: tags });
+      setVideo(updated);
+    } catch (e) {
+      setActionError(`Не удалось сохранить теги: ${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleCompress() {
@@ -540,6 +557,10 @@ export default function WatchPage() {
           />
           <p className="text-xs text-white/30">Press Enter to save tags{saving ? " - saving..." : ""}</p>
         </div>
+
+        {actionError ? (
+          <p className="text-xs text-red-300">{actionError}</p>
+        ) : null}
       </div>
 
       <div className="rounded-[2rem] border border-white/10 bg-white/5 p-6 space-y-3">
