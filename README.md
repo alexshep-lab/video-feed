@@ -103,10 +103,11 @@ copy .env.example .env
 
 # 4. (Optional) Build frontend — a prebuilt bundle lives in frontend_static/
 #    when you pull a release; rebuild only if you changed the React code.
+#    `npm run build` writes directly into ../frontend_static (configured in
+#    vite.config.ts), so no extra copy step is needed.
 cd frontend
 npm install
 npm run build
-xcopy /e /i /y dist\* ..\frontend_static\
 cd ..
 
 # 5. Run
