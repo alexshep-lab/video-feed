@@ -824,7 +824,7 @@ def replace_converted_originals(db: Session = Depends(get_db)) -> dict:
         except OSError:
             new_size = v.file_size or 0
 
-        v.original_path = str(target)
+        v.original_path = str(target.resolve())
         v.original_filename = target.name
         v.file_size = new_size
         v.codec = "h264"

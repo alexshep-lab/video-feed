@@ -357,7 +357,7 @@ async def _compress_video(video_id: str) -> None:
         # "UNIQUE constraint failed: videos.original_path" on UPDATE.
         target_collision = session.scalar(
             select(Video).where(
-                Video.original_path == str(out_path),
+                Video.original_path == str(out_path.resolve()),
                 Video.id != video_id,
             )
         )
@@ -375,9 +375,14 @@ async def _compress_video(video_id: str) -> None:
             )
             return
 
-        video.original_path = str(out_path)
+        # .resolve() everywhere we persist a path, to match scanner.py and
+        # videos.move_video — the scanner's existing_by_path lookup keys on
+        # the resolved string, so a non-resolved write here causes the next
+        # scan to miss the row and either spawn a duplicate or fall through
+        # to the moved-video heuristic.
+        video.original_path = str(out_path.resolve())
         video.original_filename = out_path.name
-        video.library_path = str(out_path.parent)
+        video.library_path = str(out_path.parent.resolve())
         video.file_size = new_size
         video.file_mtime = out_path.stat().st_mtime
         video.duration = new_metadata.get("duration", video.duration)
