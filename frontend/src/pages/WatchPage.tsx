@@ -99,7 +99,11 @@ export default function WatchPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const watchTimeRef = useRef(0);
+  // Last absolute playback position we reported a delta from. The /update-watch-time
+  // endpoint treats its `seconds` arg as an INCREMENT and adds it to total_watch_time;
+  // sending the absolute currentTime (as the original code did) would over-count
+  // by the cumulative sum (10s + 20s + 30s reported = 60s recorded for a 30s view).
+  const lastReportedTimeRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const framePaletteUrl = videoId ? `${API_BASE}/stream/${videoId}/contact-sheet` : "";
 
@@ -129,18 +133,31 @@ export default function WatchPage() {
     fetchRecommendations(videoId, 8).then(setRecommendations).catch(() => null);
   }, [videoId]);
 
-  // Track watch time and report every 10s
+  // Track watch time and report deltas every 10s.
+  // currentTime is an absolute playback position (in seconds from the start of
+  // the file). The server expects an increment, so each tick sends
+  // `currentTime - lastReportedTime` and updates the baseline.
+  // Edge cases:
+  //   - delta < 0:    user seeked backward → no credit, just reset baseline.
+  //   - delta > cap:  user seeked forward (cap = 2× tick to allow 2x playback) →
+  //                   reset baseline without crediting, otherwise a single seek
+  //                   to the end of a 2-hour movie would dump 7200s into stats.
+  //   - paused:       timeupdate stops firing, currentTime stays put, delta = 0.
+  const REPORT_INTERVAL_MS = 10_000;
+  const SEEK_DELTA_CAP_S = (REPORT_INTERVAL_MS / 1000) * 2;
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
-    const onTime = () => { watchTimeRef.current = el.currentTime; };
-    el.addEventListener("timeupdate", onTime);
+    lastReportedTimeRef.current = el.currentTime || 0;
     const interval = setInterval(() => {
-      if (videoId && watchTimeRef.current > 0) {
-        updateWatchTime(videoId, watchTimeRef.current).catch(() => null);
-      }
-    }, 10000);
-    return () => { el.removeEventListener("timeupdate", onTime); clearInterval(interval); };
+      if (!videoId) return;
+      const now = el.currentTime;
+      const delta = now - lastReportedTimeRef.current;
+      lastReportedTimeRef.current = now;
+      if (delta <= 0 || delta > SEEK_DELTA_CAP_S) return;
+      updateWatchTime(videoId, delta).catch(() => null);
+    }, REPORT_INTERVAL_MS);
+    return () => { clearInterval(interval); };
     // Use video?.id (stable string after load) instead of the whole video
     // object so PATCH responses (toggleFavorite/saveTags/etc.) don't tear
     // down and recreate the report interval on every state change.
@@ -239,7 +256,7 @@ export default function WatchPage() {
     if (!el || !video) return;
 
     setPlayerError(null);
-    watchTimeRef.current = 0;
+    lastReportedTimeRef.current = 0;
     hlsRef.current?.destroy();
     hlsRef.current = null;
 
