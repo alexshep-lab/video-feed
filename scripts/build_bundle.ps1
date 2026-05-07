@@ -9,7 +9,7 @@
       2. Cleans previous PyInstaller artefacts (build/, dist/VideoFeed/).
       3. Runs `pyinstaller videofeed.spec`.
 
-    The script is idempotent — re-runs only rebuild whatever changed.
+    The script is idempotent - re-runs only rebuild whatever changed.
     Output: dist/VideoFeed/VideoFeed.exe (plus supporting DLLs + frontend_static/).
 
 .PARAMETER SkipFrontend
@@ -61,7 +61,7 @@ if (-not $SkipFrontend) {
 }
 
 if (-not (Test-Path "frontend_static\index.html")) {
-    throw "frontend_static\index.html missing — frontend build did not produce expected output."
+    throw "frontend_static\index.html missing - frontend build did not produce expected output."
 }
 
 # 2. Clean previous artefacts -----------------------------------------------
@@ -74,8 +74,11 @@ foreach ($dir in @("build", "dist\VideoFeed")) {
 
 # 3. Run PyInstaller --------------------------------------------------------
 Write-Host ">> Running PyInstaller..." -ForegroundColor Cyan
-& $VenvPython -m PyInstaller --noconfirm videofeed.spec
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
+# Merge stderr into stdout (2>&1) so PowerShell does not treat PyInstaller's
+# normal INFO log lines (which it writes to stderr) as native-command errors
+# under $ErrorActionPreference="Stop". Exit code stays authoritative.
+& $VenvPython -m PyInstaller --noconfirm videofeed.spec 2>&1 | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed (exit $LASTEXITCODE)" }
 
 $exePath = Join-Path $repoRoot "dist\VideoFeed\VideoFeed.exe"
 if (-not (Test-Path $exePath)) {

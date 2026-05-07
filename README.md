@@ -145,6 +145,33 @@ pip install -r backend/requirements-dev.txt
 python -m pytest tests/ -v
 ```
 
+### Build a Windows desktop bundle
+
+The repo ships with a PyInstaller spec and PowerShell scripts that
+produce a self-contained `dist\VideoFeed\` folder with a launcher
+`.exe`, plus a one-click Desktop shortcut.
+
+```powershell
+# Once: dev deps + PyInstaller
+.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
+
+# Build (rebuilds frontend, then PyInstaller)
+.\scripts\build_bundle.ps1
+
+# Install Desktop shortcut pointing at the built .exe
+.\scripts\install_shortcut.ps1
+```
+
+Output: `dist\VideoFeed\VideoFeed.exe` (~40 MB total bundle). Launching
+it starts the FastAPI server on `127.0.0.1:47999` (or the next free
+port) and pops the default browser at the URL once `/health` responds.
+No console window. Logs land in
+`%LOCALAPPDATA%\VideoFeed\logs\server.log` (rotated, 2 MB × 3).
+
+FFmpeg / ffprobe are **not bundled** — install them separately and
+make sure they're on `PATH`. `/health` reports availability and the
+SPA shows a banner if either is missing.
+
 ---
 
 ## Architecture

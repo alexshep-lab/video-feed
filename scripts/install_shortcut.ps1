@@ -6,7 +6,7 @@
 .DESCRIPTION
     Creates VideoFeed.lnk on the user's Desktop pointing at
     dist\VideoFeed\VideoFeed.exe with the project's favicon as its icon.
-    Idempotent — re-running overwrites the existing shortcut.
+    Idempotent - re-running overwrites the existing shortcut.
 
 .PARAMETER ExePath
     Override the path to the built .exe. Defaults to
@@ -46,7 +46,7 @@ $wshell = New-Object -ComObject WScript.Shell
 $lnk = $wshell.CreateShortcut($ShortcutPath)
 $lnk.TargetPath = $ExePath
 $lnk.WorkingDirectory = Split-Path -Parent $ExePath
-$lnk.Description = "VideoFeed — self-hosted home video streaming"
+$lnk.Description = "VideoFeed - self-hosted home video streaming"
 if (Test-Path $icon) {
     $lnk.IconLocation = "$icon,0"
 }

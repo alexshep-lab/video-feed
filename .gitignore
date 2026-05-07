@@ -14,3 +14,5 @@ frontend_static/
 .codex-logs/
 .claude/
 *.log
+build/
+.pytest_tmp/
