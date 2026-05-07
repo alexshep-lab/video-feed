@@ -9,9 +9,9 @@
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
-![Version](https://img.shields.io/badge/version-0.2.0-purple)
+![Version](https://img.shields.io/badge/version-0.3.0-purple)
 
-Latest release: **v0.2.0** — *2026-04-21* · see [CHANGELOG.md](CHANGELOG.md).
+Latest release: **v0.3.0** — *2026-05-07* · see [CHANGELOG.md](CHANGELOG.md).
 
 > ⚠️ **No auth, trusted-network only.** Read [SECURITY.md](SECURITY.md)
 > before exposing the port anywhere.
@@ -206,7 +206,7 @@ Prefix `/api`. See `backend/routers/` for exhaustive parameters.
 | `GET /maintenance/tags/extract-preview` · `POST .../tags/extract` | Filename tag extraction. |
 | `GET /maintenance/library/screen-folders` · `POST .../purge` | Screenshot folder cleanup. |
 | `GET /maintenance/encoder` | Active encoder + NVENC availability. |
-| `GET /api/version` · `GET /health` | Version info + liveness. |
+| `GET /api/version` · `GET /health` | Version info + liveness. `/health` also reports `database` mode and `ffmpeg` / `ffprobe` availability. |
 | `GET /stats` | Overview + pipeline stats. |
 
 ## Notes
@@ -220,8 +220,12 @@ Prefix `/api`. See `backend/routers/` for exhaustive parameters.
   some old WMV — these auto-fall-back to CPU decode (NVENC encode
   still applies).
 - If file-based SQLite isn't writable (permissions / read-only FS),
-  the backend falls back to an in-memory DB so the app still starts
-  — library state is lost on restart in that mode.
+  the backend falls back to an in-memory DB so the app still starts.
+  Library state is lost on restart in that mode — the underlying error
+  is logged at `ERROR` level so you can see what went wrong in stderr.
+- Default port is **7999**. If it's busy (second instance, IDE proxy)
+  the launcher walks 8000…8008 looking for the first free port and
+  writes the chosen one to `%LOCALAPPDATA%\VideoFeed\data\port.txt`.
 
 ## Roadmap
 
@@ -230,6 +234,13 @@ Prefix `/api`. See `backend/routers/` for exhaustive parameters.
 - More theming options in the UI
 - Orphan derived-asset cleanup
 
+## Author
+
+Alex Shepelev (**AlexShep**) — <alexandersysoev95@gmail.com> · [github.com/alexshep-lab](https://github.com/alexshep-lab)
+
+Bug reports and feature requests are welcome via
+[GitHub issues](https://github.com/alexshep-lab/video-feed/issues).
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Alex Shepelev (AlexShep-Labs).
