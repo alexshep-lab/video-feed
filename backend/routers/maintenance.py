@@ -197,6 +197,7 @@ def compress_archive_list() -> dict:
 def compress_archive_purge(
     older_than_days: int | None = Body(default=None),
     paths: list[str] | None = Body(default=None),
+    confirm: bool = Body(default=False),
 ) -> dict:
     """Recycle-bin archived originals.
 
@@ -205,8 +206,17 @@ def compress_archive_purge(
         ``big_archive_dir`` are silently rejected (defense in depth).
       - ``older_than_days`` — applied only when ``paths`` is empty/null; every
         file older than the cutoff is recycled.
-      - Both null → purge the entire archive.
+      - Both null → purge the entire archive. Requires ``confirm: true``
+        in the body to prevent an empty POST from wiping everything (e.g.
+        a stray click in the UI, a CSRF poke from another tab).
     """
+    if not paths and older_than_days is None and not confirm:
+        raise HTTPException(
+            400,
+            "Refusing to purge entire archive without explicit confirmation. "
+            "Pass `confirm: true` in the body, or scope by `paths` / "
+            "`older_than_days`.",
+        )
     from ..config import get_settings
     return purge_archive(
         get_settings().big_archive_dir,
@@ -542,8 +552,22 @@ def list_missing_files(request: Request, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/missing-files/purge")
-def purge_missing_files(db: Session = Depends(get_db)) -> dict:
-    """Hard-delete DB rows whose source file is gone. Also drops derived assets."""
+def purge_missing_files(
+    db: Session = Depends(get_db),
+    confirm: bool = Body(default=False, embed=True),
+) -> dict:
+    """Hard-delete DB rows whose source file is gone. Also drops derived assets.
+
+    Requires ``confirm: true`` in the body — a transiently-disconnected
+    drive can make every row look "missing", so an unconfirmed empty POST
+    must not wipe the library.
+    """
+    if not confirm:
+        raise HTTPException(
+            400,
+            "Refusing to purge missing-file rows without explicit "
+            "confirmation. Pass `confirm: true` in the body.",
+        )
     import os
     from ..models import Video as _V, WatchEvent, WatchProgress
     from ..services.thumbnail import invalidate_video_cache
@@ -605,13 +629,23 @@ def list_short_videos(
 @router.post("/short-videos/purge")
 def purge_short_videos(
     max_seconds: float = Query(default=420.0, ge=1.0),
+    confirm: bool = Body(default=False, embed=True),
     db: Session = Depends(get_db),
 ) -> dict:
     """Move files with duration <= max_seconds to Recycle Bin and hard-delete rows.
 
     NULL durations are skipped. Files that can't be moved (locked, permission)
     leave the DB row untouched so a retry can pick them up.
+
+    Requires ``confirm: true`` in the body — ``max_seconds`` is client-supplied
+    and a large value would recycle the entire library.
     """
+    if not confirm:
+        raise HTTPException(
+            400,
+            "Refusing to recycle short videos without explicit confirmation. "
+            "Pass `confirm: true` in the body.",
+        )
     import os
     from pathlib import Path as _P
     from ..models import Video as _V, WatchEvent, WatchProgress

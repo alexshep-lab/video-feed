@@ -394,11 +394,15 @@ export async function purgeCompressArchive(body: {
   total_bytes_freed: number;
   errors: { path: string; error: string }[];
 }> {
+  // Server requires confirm:true when neither paths nor older_than_days
+  // are set (full-archive purge). Sending it on every call is harmless for
+  // scoped requests and keeps the client free of mode-specific branching.
   const r = await fetch(`${API_BASE}/maintenance/compress/archive/purge`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, confirm: true }),
   });
+  if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
@@ -417,7 +421,12 @@ export async function fetchMissingFiles(): Promise<{ count: number; items: Missi
 }
 
 export async function purgeMissingFiles(): Promise<{ purged: number }> {
-  const r = await fetch(`${API_BASE}/maintenance/missing-files/purge`, { method: "POST" });
+  const r = await fetch(`${API_BASE}/maintenance/missing-files/purge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: true }),
+  });
+  if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
@@ -450,7 +459,10 @@ export async function purgeShortVideos(maxSeconds: number): Promise<{
 }> {
   const r = await fetch(`${API_BASE}/maintenance/short-videos/purge?max_seconds=${maxSeconds}`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: true }),
   });
+  if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
