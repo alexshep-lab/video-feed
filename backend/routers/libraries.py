@@ -40,26 +40,54 @@ def list_libraries(db: Session = Depends(get_db)) -> list[LibraryFolderOut]:
     ]
 
 
+_EXPAND_MAX_FOLDERS = 1000
+
+
+def _collect_subfolders(root: Path) -> list[Path]:
+    """Immediate (one-level) subdirectories of ``root``, sorted by name.
+
+    Bounded on purpose: an unbounded ``rglob`` over a path the client
+    chose (worst case ``C:\\``) would stat millions of directories, lock
+    a worker thread, and write thousands of LibraryFolder rows in one
+    request. Going one level deep covers the realistic use case ("split
+    each top-level genre folder into its own filterable entry") without
+    that DoS surface — users who want deeper structure can re-call the
+    endpoint on the subfolders they care about.
+    """
+    out: list[Path] = []
+    try:
+        children = sorted(root.iterdir())
+    except (OSError, PermissionError):
+        return out
+    for child in children:
+        try:
+            if child.is_dir():
+                out.append(child)
+        except OSError:
+            continue
+        if len(out) >= _EXPAND_MAX_FOLDERS:
+            break
+    return out
+
+
 @router.post("", response_model=list[LibraryFolderOut], status_code=201)
 def add_library(
     payload: LibraryFolderCreate,
     expand_subfolders: bool = Query(default=True),
     db: Session = Depends(get_db),
 ) -> list[LibraryFolderOut]:
-    """Add a library folder. If expand_subfolders=True (default), also adds
-    every immediate subfolder that contains video files as separate entries."""
+    """Add a library folder. With expand_subfolders=true (default), also
+    adds each immediate subdirectory as its own entry so filters can pick
+    them apart."""
     root = Path(payload.path).resolve()
     if not root.is_dir():
         raise HTTPException(400, f"Directory does not exist: {root}")
 
     added: list[LibraryFolder] = []
 
-    # Collect folders to add: root + all nested subfolders recursively
     folders_to_add = [root]
     if expand_subfolders:
-        for child in sorted(root.rglob("*")):
-            if child.is_dir():
-                folders_to_add.append(child)
+        folders_to_add.extend(_collect_subfolders(root))
 
     existing_paths = {
         f.path
