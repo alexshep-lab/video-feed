@@ -236,11 +236,11 @@ Prefix `/api`. See `backend/routers/` for exhaustive parameters.
 
 ## Author
 
-Alex Shepelev (**AlexShep**) — <alexandersysoev95@gmail.com> · [github.com/alexshep-lab](https://github.com/alexshep-lab)
+Alexander Sysoev (handle: **AlexShep**) — <alexandersysoev95@gmail.com> · [github.com/alexshep-lab](https://github.com/alexshep-lab)
 
 Bug reports and feature requests are welcome via
 [GitHub issues](https://github.com/alexshep-lab/video-feed/issues).
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Alex Shepelev (AlexShep-Labs).
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Alexander Sysoev (AlexShep-Labs).
