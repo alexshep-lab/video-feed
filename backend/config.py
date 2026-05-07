@@ -2,15 +2,46 @@ from __future__ import annotations
 
 from functools import lru_cache
 import os
+import sys
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+def _frozen() -> bool:
+    return getattr(sys, "frozen", False)
+
+
+def _resource_root() -> Path:
+    """Where read-only bundled resources (frontend_static, etc.) live.
+
+    In a PyInstaller bundle this is `sys._MEIPASS` (the extraction temp dir);
+    in source mode it is the repo root.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    return Path(__file__).resolve().parent.parent
+
+
+def _install_root() -> Path:
+    """Directory of the running exe (or repo root in source mode).
+
+    Use this for files the user is meant to edit alongside the install —
+    chiefly an optional `.env` next to the exe.
+    """
+    if _frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT_DIR = _resource_root()
 APPDATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(ROOT_DIR / ".local"))) / "VideoFeed"
-ENV_FILE = ROOT_DIR / ".env"
+# In source: repo/.env. In a frozen bundle: an optional .env next to the
+# exe (user-editable, persists across runs); the bundled _MEIPASS copy is
+# wiped on every launch and would never see user edits.
+ENV_FILE = _install_root() / ".env"
 
 
 class Settings(BaseSettings):
@@ -99,6 +130,11 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.database_path.as_posix()}"
+
+    @property
+    def static_dir(self) -> Path:
+        """Built frontend bundle (read-only, ships with the app)."""
+        return ROOT_DIR / "frontend_static"
 
 
 @lru_cache(maxsize=1)

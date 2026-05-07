@@ -159,7 +159,7 @@ app.include_router(libraries.router, prefix=settings.api_prefix)
 app.include_router(stats.router, prefix=settings.api_prefix)
 app.include_router(maintenance.router, prefix=settings.api_prefix)
 
-STATIC_DIR = settings.root_dir / "frontend_static"
+STATIC_DIR = settings.static_dir
 STATIC_INDEX = STATIC_DIR / "index.html"
 
 _assets_dir = STATIC_DIR / "assets"
